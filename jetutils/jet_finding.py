@@ -493,11 +493,34 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
 
     def dl(col):
         return pl.col(col).max() - pl.col(col).min()
-
+ 
+    def circular_mean_lon():
+        # Convert longitude to radians
+        lon_rad = pl.col("lon") * np.pi / 180.0
+        weights = pl.col("s")
+        
+        # Compute weighted sine and cosine
+        weighted_sin = (weights * lon_rad.sin()).sum()
+        weighted_cos = (weights * lon_rad.cos()).sum()
+        total_weight = weights.sum()
+        
+        # Compute mean sine and cosine
+        mean_sin = weighted_sin / total_weight
+        mean_cos = weighted_cos / total_weight
+        
+        # Convert back to degrees using atan2
+        mean_lon_rad = pl.arctan2(mean_sin, mean_cos)
+        mean_lon_deg = mean_lon_rad * 180.0 / np.pi
+        
+        return mean_lon_deg
+    
     aggregations = [
+         
+        circular_mean_lon().alias("mean_lon"),
+        
         *[
             ((pl.col(col) * pl.col("s")).sum() / pl.col("s").sum()).alias(f"mean_{col}")
-            for col in position_columns
+            for col in position_columns if col != "lon"
         ],
         pl.col("s").mean().alias("mean_s"),
         *[
@@ -1796,13 +1819,13 @@ class JetFindingExperiment(object):
         if ofile_pad.is_file() and categorize and not force:
             return pl.read_parquet(ofile_pad)
         if ofile_padu.is_file() and categorize and not force:
-            props_as_df = average_jet_categories(pl.read_parquet(ofile_padu))
+            props_as_df = average_jet_categories(pl.read_parquet(ofile_padu)) #, allow_hybrid=True )
             # props_as_df = self.add_com_speed(props_as_df)
             props_as_df.write_parquet(ofile_pad)
             return props_as_df
         props_as_df = self.compute_jet_props(force=force > 1)
         props_as_df.write_parquet(ofile_padu)
-        props_as_df_cat = average_jet_categories(props_as_df)
+        props_as_df_cat = average_jet_categories(props_as_df) #, allow_hybrid=True)
         # props_as_df_cat = self.add_com_speed(props_as_df_cat)
         props_as_df_cat.write_parquet(ofile_pad)
         if categorize:
