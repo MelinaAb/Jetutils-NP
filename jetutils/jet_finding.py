@@ -491,7 +491,7 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
         col for col in ["lon", "lat", "lev", "theta"] if col in df.columns
     ]
 
-    def dl(col):
+    def dl(col): # remove or wait for fix
         return pl.col(col).max() - pl.col(col).min()
  
     def circular_mean_lon():
@@ -514,6 +514,18 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
         
         return mean_lon_deg
     
+    diff_lon = pl.col("lon").diff()
+    diff_lon = (
+        pl
+        .when(diff_lon > 180)
+        .then(diff_lon - 360)
+        .when(diff_lon <= -180)
+        .then(diff_lon + 360)
+        .otherwise(diff_lon)
+    )
+    
+    unraveled_lon = pl.col("lon").first() + diff_lon.cum_sum().fill_null(0.)
+    
     aggregations = [
          
         circular_mean_lon().alias("mean_lon"),
@@ -533,8 +545,10 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
             .struct.field("beta").first().alias("tilt")
         ),
         (
-            1 - pds.lin_reg_report(pl.col("lon"), target=pl.col("lat"), add_bias=True)
-            .struct.field("r2").first()
+            1
+            - pds.lin_reg_report(unraveled_lon, target=pl.col("lat"), add_bias=True)
+            .struct.field("r2")
+            .first()
         ).alias("waviness1"),
         (pl.col("lat") - pl.col("lat").mean()).pow(2).sum().alias("waviness2"),
         (
@@ -545,7 +559,7 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
             jet_integral_haversine(pl.col("lon"), pl.col("lat"), x_is_one=True)
             / pl.lit(RADIUS)
             / pl.col("lat").mean().radians().cos()
-            / dl("lon")
+            / dl("lon") #change 
         ).alias("wavinessDC16"),
         (
             ((pl.col("v") - pl.col("v").mean()) * pl.col("v").abs() / pl.col("s")).sum()
@@ -553,10 +567,10 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
         ).alias("wavinessFV15"),
         jet_integral_haversine(pl.col("lon"), pl.col("lat"), pl.col("s")).alias("int"),
         jet_integral_haversine(
-            pl.col("lon").filter(pl.col("lon") > -10),
-            pl.col("lat").filter(pl.col("lon") > -10),
-            pl.col("s").filter(pl.col("lon") > -10),
-        ).alias("int_over_europe"),
+            pl.col("lon").filter((pl.col("lon") > -130) & (pl.col("lon") < -80)),
+            pl.col("lat").filter((pl.col("lon") > -130) & (pl.col("lon") < -80)),
+            pl.col("s").filter((pl.col("lon") > -130) & (pl.col("lon") < -80)),
+        ).alias("int_over_namerica"),
         pl.col("is_polar").mean(),
     ]
 
@@ -1273,14 +1287,15 @@ def categorize_jets(
     force: int = 0,
     mode: (
         Literal["year"] | Literal["season"] | Literal["month"] | Literal["week"]
-    ) = "week",
+    ) = "month", #"week",
     n_components: int | Sequence = 2,
     n_init: int = 20,
     init_params: str = "random_from_data",
     v2: bool = True,
 ):
     if feature_names is None:
-        feature_names = ("ratio", "theta")
+        #feature_names = ("ratio", "theta")
+        feature_names = ("s", "theta")
     if "ratio" in feature_names and low_wind is None:
         print("you need to provide low wind")
         raise ValueError
