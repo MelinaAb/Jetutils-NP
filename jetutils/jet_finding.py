@@ -491,7 +491,7 @@ def compute_jet_props(df: pl.DataFrame) -> pl.DataFrame:
         col for col in ["lon", "lat", "lev", "theta"] if col in df.columns
     ]
 
-    def dl(col): # remove or wait for fix
+    def dl(col): #fix or delete
         return pl.col(col).max() - pl.col(col).min()
  
     def circular_mean_lon():

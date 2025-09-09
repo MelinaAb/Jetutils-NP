@@ -4,6 +4,7 @@ from typing import Mapping, Sequence, Tuple, Union, Iterable, Callable
 from math import log10, floor
 
 import numpy as np
+import pandas as pd
 from scipy.stats import gaussian_kde
 from scipy.interpolate import LinearNDInterpolator
 import xarray as xr
@@ -1080,64 +1081,1532 @@ def plot_seasonal(
         sharex="all",
     )
     axes = axes.flatten()
-    jets = props_as_df["jet"].unique().to_numpy()
-    njets = len(jets)
+    #jets = props_as_df["jet"].unique().to_numpy()
+    #njets = len(jets)
     gb = props_as_df.group_by(
         [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")],
     )
     means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
     means = periodic_rolling_pl(means, 15, data_vars)
-    x = means["dayofyear"].unique()
+    x = means["dayofyear"].unique().to_numpy()
     medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
     medians = periodic_rolling_pl(medians, 15, data_vars)
     q025 = gb.quantile(0.25).sort("dayofyear", "jet", descending=[False, True])
     q075 = gb.quantile(0.75).sort("dayofyear", "jet", descending=[False, True])
-    if njets == 3:
-        color_order = [2, 3, 1]
-    else:
-        color_order = [2, 1]
+   
+    jets = means["jet"].unique().to_numpy().tolist()
+
     for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
         dji = varname == "double_jet_index"
-        ys = means[varname].to_numpy().reshape(366, njets)
-        qs = np.stack(
-            [
-                q025[varname].to_numpy().reshape(366, njets),
-                q075[varname].to_numpy().reshape(366, njets),
-            ],
-            axis=2,
-        )
-        median = medians[varname].to_numpy().reshape(366, njets)
-        for i in range(njets):
-            color = "black" if dji else COLORS[color_order[i]]
-            ax.fill_between(
-                x, qs[:, i, 0], qs[:, i, 1], color=color, alpha=0.2, zorder=-10
-            )
-            ax.plot(x, median[:, i], lw=2, color=color, ls="dotted", zorder=0)
-            ax.plot(x, ys[:, i], lw=3, color=color, label=jets[i], zorder=10)
+
+        for i, jet in enumerate(jets):
+            jet_means   = means.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_medians = medians.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_q025    = q025.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_q075    = q075.filter(pl.col("jet") == jet).sort("dayofyear")
+
+            full_days = np.arange(1, 367)
+
+            # align all values on same grid (missing -> NaN)
+            ys      = np.full_like(full_days, np.nan, dtype=float)
+            median  = np.full_like(full_days, np.nan, dtype=float)
+            qs_low  = np.full_like(full_days, np.nan, dtype=float)
+            qs_high = np.full_like(full_days, np.nan, dtype=float)
+
+            day_idx = np.clip(jet_means["dayofyear"].to_numpy() - 1, 0, 365)
+            ys[day_idx] = jet_means[varname].to_numpy()
+
+            day_idx = np.clip(jet_medians["dayofyear"].to_numpy() - 1, 0, 365)
+            median[day_idx] = jet_medians[varname].to_numpy()
+
+            day_idx = np.clip(jet_q025["dayofyear"].to_numpy() - 1, 0, 365)
+            qs_low[day_idx] = jet_q025[varname].to_numpy()
+
+            day_idx = np.clip(jet_q075["dayofyear"].to_numpy() - 1, 0, 365)
+            qs_high[day_idx] = jet_q075[varname].to_numpy() 
+
+            if jet == "ALL":
+                color = "darkblue"
+            else:
+                color = "black" if dji else COLORS[i % len(COLORS)]
+            ax.fill_between(full_days, qs_low, qs_high, color=color, alpha=0.2, zorder=-10)
+            ax.plot(full_days, median, lw=2, color=color, ls="dotted", zorder=0)
+            ax.plot(full_days, ys, lw=3, color=color, label=jet, zorder=10)
             if dji:
                 break
-        if numbering:
-            ax.set_title(
-                f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
-            )
-        else:
-            ax.set_title(
-                f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
-            )
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
         ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
         ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        seasonal_days = [60, 152, 244, 335]  # March, June, Sep, Dec ca.
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):  # Only draw lines within data range
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        #tick_locs = ax.xaxis.get_major_locator()#.tick_values(min(x), max(x))
+        #for tick_loc in tick_locs:
+        #    if min(x) <= tick_loc <= max(x):  # Only draw lines within data range
+        #        ax.axvline(x=tick_loc, color='lightgray', linestyle=':', alpha=0.7, zorder=1)   
         ax.set_xlim(min(x), max(x))
         if varname == "mean_lev":
             ax.invert_yaxis()
         ylim = ax.get_ylim()
         wherex = np.isin(x, JJADOYS)
-        ax.fill_between(x, *ylim, where=wherex, alpha=0.1, color="black", zorder=-10)
+        #ax.fill_between(x, *ylim, where=wherex, alpha=0.1, color="black", zorder=-10)
         ax.set_ylim(ylim)
     axes.ravel()[0].legend().set_zorder(102)
     if save:
-        plt.savefig(f"{FIGURES}/jet_props_misc/jet_props_seasonal{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png")
     return fig
 
+
+def plot_case_study(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    start_date: str,      # "DDMMYYYY"
+    end_date: str,        # "DDMMYYYY"
+    season: str,          # "DJF", "MAM", "JJA" or "SON"
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    n_xticks: int = 6,  # number of evenly spaced ticks for case-study
+    start_date_EE: str = None,
+    end_date_EE: str = None,
+    case_name: str = None
+
+):
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    start_dt = pd.to_datetime(start_date, format="%d%m%Y")
+    end_dt   = pd.to_datetime(end_date, format="%d%m%Y")
+    case_days = pd.date_range(start_dt, end_dt, freq="D")
+    case_doys = case_days.dayofyear
+    
+    if start_date_EE is not None and end_date_EE is not None:
+        start_EE_dt = pd.to_datetime(start_date_EE, format="%d%m%Y")
+        end_EE_dt   = pd.to_datetime(end_date_EE, format="%d%m%Y")
+
+
+    # Case-study period
+    case_df = props_as_df.filter(
+        (pl.col("time") >= start_dt) & (pl.col("time") <= end_dt)
+    )
+
+    # Seasonal months
+    season_months = {"DJF": [12,1,2], "MAM": [3,4,5], "JJA": [6,7,8], "SON": [9,10,11]}
+    months = season_months[season]
+
+    # Seasonal mean for year
+    year = start_dt.year
+    seasonal_year_df = props_as_df.filter(
+        (pl.col("time").dt.year() == year) & (pl.col("time").dt.month().is_in(months))
+    )
+
+    
+    clim_start_year = max(1959, year - 10)  # Not earlier than dataset start
+    clim_end_year = year - 1
+
+    seasonal_clim_df = props_as_df.filter(
+        (pl.col("time").dt.year().is_in(range(clim_start_year, clim_end_year+1))) &
+        (pl.col("time").dt.month().is_in(months))
+    )
+
+    # x-axis ticks
+    def get_case_study_ticks(dates, n_ticks):
+        if len(dates) <= n_ticks:
+            return dates  # all dates if short
+        indices = np.linspace(0, len(dates)-1, n_ticks, dtype=int)
+        return dates[indices]
+
+    xticks = get_case_study_ticks(case_days, n_xticks)
+
+    # Case-study
+    case_df = props_as_df.filter(
+        (pl.col("time") >= start_dt) & (pl.col("time") <= end_dt)
+    )
+
+    season_months = {"DJF": [12,1,2], "MAM": [3,4,5], "JJA": [6,7,8], "SON": [9,10,11]}
+    months = season_months[season]
+
+    # Seasonal mean for year
+    year = start_dt.year
+    seasonal_year_df = props_as_df.filter(
+        (pl.col("time").dt.year() == year) & (pl.col("time").dt.month().is_in(months))
+    )
+
+    # Climatology
+    seasonal_clim_df = props_as_df.filter(
+        pl.col("time").dt.month().is_in(months)
+    )
+
+    # Daily median for case-study
+    def daily_median(df):
+        gb = df.group_by([pl.col("time").alias("time"), pl.col("jet")])
+        median = gb.agg([pl.col(col).median() for col in data_vars])
+        return median
+
+    cs_median = daily_median(case_df)
+
+    # Median by day-of-year for seasonal mean/climatology
+    def median_by_doy(df):
+        df = df.with_columns(pl.col("time").dt.ordinal_day().alias("doy"))
+        gb = df.group_by(["doy", "jet"])
+        median = gb.agg([pl.col(col).median() for col in data_vars])
+        return median
+
+    sy_median_doy = median_by_doy(seasonal_year_df)
+    sc_median_doy = median_by_doy(seasonal_clim_df)
+
+    jets = cs_median["jet"].unique().to_numpy().tolist()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        for i, jet in enumerate(jets):
+            # Case study
+            cs_pd = cs_median.filter(pl.col("jet")==jet).sort("time").to_pandas()
+            cs_pd['time'] = pd.to_datetime(cs_pd['time'])
+            cs_pd.set_index('time', inplace=True)
+            cs_vals = cs_pd[varname].reindex(case_days).to_numpy()
+
+            # Seasonal mean for year
+            sy_pd = sy_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
+            sy_pd.set_index('doy', inplace=True)
+            sy_interp = np.interp(case_doys, sy_pd.index, sy_pd[varname])
+
+            # Climatology
+            sc_pd = sc_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
+            sc_pd.set_index('doy', inplace=True)
+            sc_interp = np.interp(case_doys, sc_pd.index, sc_pd[varname])
+
+            # 10-year quantiles (25–75%) for shading
+            gb = seasonal_clim_df.with_columns(pl.col("time").dt.ordinal_day().alias("doy")) \
+                .group_by(["doy", "jet"])
+            q025 = gb.quantile(0.25).sort("doy")
+            q075 = gb.quantile(0.75).sort("doy")
+
+            # Filter current jet
+            q025_pd = q025.filter(pl.col("jet") == jet).sort("doy").to_pandas().set_index("doy")
+            q075_pd = q075.filter(pl.col("jet") == jet).sort("doy").to_pandas().set_index("doy")
+
+            # Interpolate to case_days
+            q025_interp = np.interp(case_doys, q025_pd.index, q025_pd[varname])
+            q075_interp = np.interp(case_doys, q075_pd.index, q075_pd[varname])
+
+            # Shaded area
+            ax.fill_between(case_days, q025_interp, q075_interp,
+                            color="lightgrey", alpha=0.44, label="10y quantiles", zorder=1)
+
+            label_str = f"{case_name} {case_days[0].strftime('%d.%b %Y')} to {case_days[-1].strftime('%d.%b %Y')})"
+            ax.plot(case_days, cs_vals, lw=3, color="red", label=label_str, zorder=10)
+            ax.plot(case_days, sy_interp, lw=2, color="blue", ls="--", label=f"{season} mean {year}", zorder=5)
+            ax.plot(case_days, sc_interp, lw=2, color="black", ls=":", label=f"{season} 10 Yrs seasonal mean", zorder=0)
+            
+            # Shaded area or vertical line for EE period
+            if start_date_EE is not None and end_date_EE is not None:
+                if start_EE_dt == end_EE_dt:
+                    ax.axvline(x=start_EE_dt, color='lightgrey', linestyle='-', lw=2, zorder=-5)
+                else:
+                    ax.axvspan(start_EE_dt, end_EE_dt, color='lightcoral', alpha=0.25, zorder=-5)
+
+
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)}" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)}"
+        ax.set_title(title)
+        ax.set_xlim(case_days[0], case_days[-1])
+
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([d.strftime("%d. %b") for d in xticks], rotation=45)
+
+        # Legend (bottom)
+        handles, labels = axes.ravel()[0].get_legend_handles_labels()
+        fig.legend(
+            handles, 
+            labels, 
+            loc='lower center', 
+            bbox_to_anchor=(0.5, -0.1), 
+            ncol=4, 
+            frameon=True, 
+            fancybox=True
+        )
+
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/extremeEvents/casestudy_{suffix}.png")
+    return fig
+
+
+def plot_seasonal_winter_jets(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_winter_jets",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for STJ and EDJ categories during winter period (Dec - end of March).
+    """
+
+    # Filter for winter months (December through March)
+    winter_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([12, 1, 2, 3])) &
+        (pl.col("jet").is_in(["STJ", "EDJ"]))
+    )
+
+    # Map to continuous winter-day scale: Dec 1 - 1, Jan 1 - 32, Feb 1 - 63...
+    winter_data = winter_data.with_columns(
+        pl.when(pl.col("time").dt.month() == 12)
+          .then(pl.col("time").dt.ordinal_day() - 334)
+          .otherwise(pl.col("time").dt.ordinal_day() + 31)
+          .alias("winter_day")
+    )
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    # Group by winter_day instead of full dayofyear
+    gb = winter_data.group_by([pl.col("winter_day"), pl.col("jet")])
+    means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("winter_day", "jet", descending=[False, True])
+    means = periodic_rolling_pl(means, 15, data_vars, dim="winter_day")
+    x = means["winter_day"].unique().to_numpy()
+
+    medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("winter_day", "jet", descending=[False, True])
+    medians = periodic_rolling_pl(medians, 15, data_vars, dim="winter_day")
+
+    q025 = gb.quantile(0.25).sort("winter_day", "jet", descending=[False, True])
+    q075 = gb.quantile(0.75).sort("winter_day", "jet", descending=[False, True])
+
+    jets = means["jet"].unique().to_numpy().tolist()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+
+        for i, jet in enumerate(jets):
+            jet_means   = means.filter(pl.col("jet") == jet).sort("winter_day")
+            jet_medians = medians.filter(pl.col("jet") == jet).sort("winter_day")
+            jet_q025    = q025.filter(pl.col("jet") == jet).sort("winter_day")
+            jet_q075    = q075.filter(pl.col("jet") == jet).sort("winter_day")
+
+            full_days = np.arange(1, 92) 
+
+            # align all values on same grid (missing -> NaN)
+            ys      = np.full_like(full_days, np.nan, dtype=float)
+            median  = np.full_like(full_days, np.nan, dtype=float)
+            qs_low  = np.full_like(full_days, np.nan, dtype=float)
+            qs_high = np.full_like(full_days, np.nan, dtype=float)
+
+            day_idx = np.clip(jet_means["winter_day"].to_numpy() - 1, 0, 90)
+            ys[day_idx] = jet_means[varname].to_numpy()
+
+            day_idx = np.clip(jet_medians["winter_day"].to_numpy() - 1, 0, 90)
+            median[day_idx] = jet_medians[varname].to_numpy()
+
+            day_idx = np.clip(jet_q025["winter_day"].to_numpy() - 1, 0, 90)
+            qs_low[day_idx] = jet_q025[varname].to_numpy()
+
+            day_idx = np.clip(jet_q075["winter_day"].to_numpy() - 1, 0, 90)
+            qs_high[day_idx] = jet_q075[varname].to_numpy()
+
+         
+            color = "black" if dji else COLORS[i % len(COLORS)]
+            ax.fill_between(full_days, qs_low, qs_high, color=color, alpha=0.2, zorder=-10)
+            ax.plot(full_days, median, lw=2, color=color, ls="dotted", zorder=0)
+            ax.plot(full_days, ys, lw=3, color=color, label=jet, zorder=10)
+            if dji:
+                break
+
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        tick_positions = [1, 32, 63, 91]
+        tick_labels = ['Dec', 'Jan', 'Feb', 'Mar']
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels)
+
+        # Seasons
+        for day in tick_positions:
+            ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+
+        ax.set_xlim(1, 91)
+        
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        ylim = ax.get_ylim()
+        ax.set_ylim(ylim)
+
+    axes.ravel()[0].legend().set_zorder(102)
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png")
+    return fig
+
+
+
+def plot_seasonal_summer_all(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_summer_all",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for ALL category during summer period (April - end of November).
+    """
+    # Filter for summer months (April - Nov) and ALL category
+    summer_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([4, 5, 6, 7, 8, 9, 10, 11])) &
+        (pl.col("jet") == "ALL")
+    )
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    gb = summer_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")],
+    )
+    means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means = periodic_rolling_pl(means, 15, data_vars)
+    x = means["dayofyear"].unique().to_numpy()
+    medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    medians = periodic_rolling_pl(medians, 15, data_vars)
+    q025 = gb.quantile(0.25).sort("dayofyear", "jet", descending=[False, True])
+    q075 = gb.quantile(0.75).sort("dayofyear", "jet", descending=[False, True])
+   
+    jets = means["jet"].unique().to_numpy().tolist()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+
+        for i, jet in enumerate(jets):
+            jet_means   = means.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_medians = medians.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_q025    = q025.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_q075    = q075.filter(pl.col("jet") == jet).sort("dayofyear")
+
+            full_days = np.arange(1, 367)
+
+            # align all values on same grid (missing -> NaN)
+            ys      = np.full_like(full_days, np.nan, dtype=float)
+            median  = np.full_like(full_days, np.nan, dtype=float)
+            qs_low  = np.full_like(full_days, np.nan, dtype=float)
+            qs_high = np.full_like(full_days, np.nan, dtype=float)
+
+            day_idx = np.clip(jet_means["dayofyear"].to_numpy() - 1, 0, 365)
+            ys[day_idx] = jet_means[varname].to_numpy()
+
+            day_idx = np.clip(jet_medians["dayofyear"].to_numpy() - 1, 0, 365)
+            median[day_idx] = jet_medians[varname].to_numpy()
+
+            day_idx = np.clip(jet_q025["dayofyear"].to_numpy() - 1, 0, 365)
+            qs_low[day_idx] = jet_q025[varname].to_numpy()
+
+            day_idx = np.clip(jet_q075["dayofyear"].to_numpy() - 1, 0, 365)
+            qs_high[day_idx] = jet_q075[varname].to_numpy() 
+
+            color = "darkblue"
+            ax.fill_between(full_days, qs_low, qs_high, color=color, alpha=0.2, zorder=-10)
+            ax.plot(full_days, median, lw=2, color=color, ls="dotted", zorder=0)
+            ax.plot(full_days, ys, lw=3, color=color, label=jet, zorder=10)
+            if dji:
+                break
+                
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        # markers (Apr, Jun, Sep, Nov)
+        seasonal_days = [91, 152, 244, 305]  # approx
+        for day in seasonal_days:
+            if min(x) <= day <= max(x): 
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        ylim = ax.get_ylim()
+        wherex = np.isin(x, JJADOYS)
+        # Highlight summer months if JJADOYS is defined
+        if 'JJADOYS' in globals():
+            ax.fill_between(x, *ylim, where=wherex, alpha=0.1, color="black", zorder=-10)
+        ax.set_ylim(ylim)
+        
+    axes.ravel()[0].legend().set_zorder(102)
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summerdif_{suffix}.png")
+    return fig
+
+
+def plot_seasonal_summer_periods(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_summer_periods",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for ALL category during summer period (April - end of November),
+    showing the full period average plus two time periods: 1959-1990 and 1991-2022.
+    """
+    # Filter for summer months (April - November) and ALL category
+    summer_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([4, 5, 6, 7, 8, 9, 10, 11])) &
+        (pl.col("jet") == "ALL")
+    )
+    
+    # Split into periods: full period, period1, period2
+    full_data = summer_data
+    period1_data = summer_data.filter(
+        (pl.col("time").dt.year() >= 1959) & (pl.col("time").dt.year() <= 1990)
+    )
+    period2_data = summer_data.filter(
+        (pl.col("time").dt.year() >= 1991) & (pl.col("time").dt.year() <= 2022)
+    )
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    periods_data = {
+        "All years": full_data,
+        "1959-1990": period1_data,
+        "1991-2022": period2_data
+    }
+    
+    colors = {
+        "All years": "darkblue",
+        "1959-1990": "orange", 
+        "1991-2022": "darkred"
+    }
+    
+    linestyles = {
+        "All years": "-",
+        "1959-1990": ":",
+        "1991-2022": "--"
+    }
+    
+    # Stats
+    period_stats = {}
+    for period_name, period_data in periods_data.items():
+        gb = period_data.group_by(
+            [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")],
+        )
+        
+        means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+        means = periodic_rolling_pl(means, 15, data_vars)
+        
+        medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+        medians = periodic_rolling_pl(medians, 15, data_vars)
+        
+        period_stats[period_name] = {
+            'means': means,
+            'medians': medians
+        }
+    
+    # X-axis range
+    x = period_stats["All years"]['means']["dayofyear"].unique().to_numpy()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+        
+        # Plotting
+        for period_name, stats in period_stats.items():
+            means = stats['means']
+            medians = stats['medians']
+            
+            if len(means) == 0:  # Skip if no data for this period?
+                continue
+                
+            jets = means["jet"].unique().to_numpy().tolist()
+            color = colors[period_name]
+            linestyle = linestyles[period_name]
+            
+            for i, jet in enumerate(jets):
+                jet_means   = means.filter(pl.col("jet") == jet).sort("dayofyear")
+                jet_medians = medians.filter(pl.col("jet") == jet).sort("dayofyear")
+
+                if len(jet_means) == 0:
+                    continue
+
+                full_days = np.arange(1, 367)
+
+                # align all values on same grid (missing -> NaN)
+                ys      = np.full_like(full_days, np.nan, dtype=float)
+                median  = np.full_like(full_days, np.nan, dtype=float)
+
+                day_idx = np.clip(jet_means["dayofyear"].to_numpy() - 1, 0, 365)
+                ys[day_idx] = jet_means[varname].to_numpy()
+
+                day_idx = np.clip(jet_medians["dayofyear"].to_numpy() - 1, 0, 365)
+                median[day_idx] = jet_medians[varname].to_numpy()
+
+                ax.plot(full_days, ys, lw=3, color=color, label=period_name, 
+                       linestyle=linestyle, zorder=10)
+                
+                if dji:
+                    break
+                
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        
+        # Summer markers (Apr, Jun, Sep, Nov)
+        seasonal_days = [91, 152, 244, 305]  # approx
+        for day in seasonal_days:
+            if min(x) <= day <= max(x): 
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        
+    # Legend
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.06), 
+               ncol=3, frameon=True, fancybox=True)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summer_periods_{suffix}.png")
+    return fig
+
+def plot_seasonal_summer_periods(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_summer_periods",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for ALL category during summer period (April - E. o November)+ full period average + split in two time periods (1959-1990 and 1991-2022).
+    """
+    # Filter for summer months (April - Nov) and ALL category
+    summer_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([4, 5, 6, 7, 8, 9, 10, 11])) &
+        (pl.col("jet") == "ALL")
+    )
+    
+    # Full period, period1, period2
+    full_data = summer_data 
+    period1_data = summer_data.filter(
+        (pl.col("time").dt.year() >= 1959) & (pl.col("time").dt.year() <= 1990)
+    )
+    period2_data = summer_data.filter(
+        (pl.col("time").dt.year() >= 1991) & (pl.col("time").dt.year() <= 2022)
+    )
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    periods_data = {
+        "All years": full_data,
+        "Period 1 (1959-1990)": period1_data,
+        "Period 2 (1991-2022)": period2_data
+    }
+    
+    colors = {
+        "All years": "darkblue",
+        "Period 1 (1959-1990)": "orange", 
+        "Period 2 (1991-2022)": "darkred"
+    }
+    
+    linestyles = {
+        "All years": "-",
+        "Period 1 (1959-1990)": ":",
+        "Period 2 (1991-2022)": "-"
+    }
+    
+    # Stats
+    period_stats = {}
+    for period_name, period_data in periods_data.items():
+        gb = period_data.group_by(
+            [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")],
+        )
+        
+        means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+        means = periodic_rolling_pl(means, 15, data_vars)
+        
+        medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+        medians = periodic_rolling_pl(medians, 15, data_vars)
+        
+        period_stats[period_name] = {
+            'means': means,
+            'medians': medians
+        }
+    
+    # X-axis range
+    x = period_stats["All years"]['means']["dayofyear"].unique().to_numpy()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+        
+        for period_name, stats in period_stats.items():
+            means = stats['means']
+            medians = stats['medians']
+            
+            if len(means) == 0:  # Skip if no data for this period
+                continue
+                
+            jets = means["jet"].unique().to_numpy().tolist()
+            color = colors[period_name]
+            linestyle = linestyles[period_name]
+            
+            for i, jet in enumerate(jets):
+                jet_means   = means.filter(pl.col("jet") == jet).sort("dayofyear")
+                jet_medians = medians.filter(pl.col("jet") == jet).sort("dayofyear")
+
+                if len(jet_means) == 0:
+                    continue
+
+                full_days = np.arange(1, 367)
+
+                # align all values on same grid (missing -> NaN)
+                ys      = np.full_like(full_days, np.nan, dtype=float)
+                median  = np.full_like(full_days, np.nan, dtype=float)
+
+                day_idx = np.clip(jet_means["dayofyear"].to_numpy() - 1, 0, 365)
+                ys[day_idx] = jet_means[varname].to_numpy()
+
+                day_idx = np.clip(jet_medians["dayofyear"].to_numpy() - 1, 0, 365)
+                median[day_idx] = jet_medians[varname].to_numpy()
+
+                ax.plot(full_days, ys, lw=3, color=color, label=period_name, 
+                       linestyle=linestyle, zorder=10)
+                
+                if dji:
+                    break
+                
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        
+        # Summer markers (Apr, Jun, Sep, Nov)
+        seasonal_days = [91, 152, 244, 305] #ca.
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):  # Only draw lines within data range
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        
+    # Legend below plots
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, frameon=True, fancybox=True)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summer_periods_{suffix}.png")
+    return fig
+
+def plot_seasonal_winter_jets_difference(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_winter_jets_difference",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for STJ and EDJ categories during winter period (Dec - E. o. March),
+    comparing two climate periods: 1959-1990 (dotted lines) vs 1991-2022 (solid lines).
+    STJ pink, EDJ green.
+    """
+    
+    # Filter winter months + jet types
+    winter_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([12, 1, 2, 3])) &
+        (pl.col("jet").is_in(["STJ", "EDJ"]))
+    )
+
+    # Map to continuous winter-day scale: Dec 1 - 1, Jan 1 - 32, Feb 1 ....
+    winter_data = winter_data.with_columns(
+        pl.when(pl.col("time").dt.month() == 12)
+          .then(pl.col("time").dt.ordinal_day() - 334)
+          .otherwise(pl.col("time").dt.ordinal_day() + 31)
+          .alias("winter_day")
+    )
+    
+    # Add period classification
+    winter_data = winter_data.with_columns(
+        pl.when(pl.col("time").dt.year() <= 1990)
+          .then(pl.lit("1959-1990"))
+          .when(pl.col("time").dt.year() >= 1991)
+          .then(pl.lit("1991-2022"))
+          .otherwise(pl.lit("other"))
+          .alias("period")
+    )
+    
+    # Filter data not in periods
+    winter_data = winter_data.filter(pl.col("period").is_in(["1959-1990", "1991-2022"]))
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    # Group by winter_day, jet, and period
+    gb = winter_data.group_by([pl.col("winter_day"), pl.col("jet"), pl.col("period")])
+    means = gb.agg([pl.col(col).mean() for col in data_vars]).sort(["winter_day", "jet", "period"])
+    
+    # Rolling average - handle each jet-period combination separately
+    rolled_means = []
+    for jet in ["STJ", "EDJ"]:
+        for period in ["1959-1990", "1991-2022"]:
+            subset = means.filter((pl.col("jet") == jet) & (pl.col("period") == period))
+            if len(subset) > 0:
+                rolled_subset = periodic_rolling_pl(subset, 15, data_vars, dim="winter_day")
+                # Jet and period columns are preserved
+                rolled_subset = rolled_subset.with_columns([
+                    pl.lit(jet).alias("jet"),
+                    pl.lit(period).alias("period")
+                ])
+                rolled_means.append(rolled_subset)
+    
+    if rolled_means:
+        means = pl.concat(rolled_means)
+    
+    jets = ["STJ", "EDJ"]
+    periods = ["1959-1990", "1991-2022"]
+    
+    # STJ = pink, EDJ = green
+    jet_colors = {"STJ": "hotpink", "EDJ": "green"}
+    # Line style: 1959-1990 = dotted, 1991-2022 = solid
+    period_styles = {"1959-1990": "dotted", "1991-2022": "solid"}
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+        
+        for jet in jets:
+            for period in periods:
+                jet_period_data = means.filter(
+                    (pl.col("jet") == jet) & (pl.col("period") == period)
+                ).sort("winter_day")
+                
+                if len(jet_period_data) == 0:
+                    continue
+                
+                full_days = np.arange(1, 92)  # 1–91
+                ys = np.full_like(full_days, np.nan, dtype=float)
+                
+                day_idx = np.clip(jet_period_data["winter_day"].to_numpy() - 1, 0, 90)
+                ys[day_idx] = jet_period_data[varname].to_numpy()
+                
+                color = "black" if dji else jet_colors[jet]
+                linestyle = period_styles[period]
+                linewidth = 2.5 if linestyle == "solid" else 2
+                alpha = 1.0 if linestyle == "solid" else 0.8
+                
+                label = f"{jet} ({period})" if not dji else f"DJI ({period})"
+                ax.plot(
+                    full_days, ys, 
+                    lw=linewidth, 
+                    color=color, 
+                    linestyle=linestyle,
+                    alpha=alpha,
+                    label=label, 
+                    zorder=10
+                )
+                
+                if dji:
+                    break
+            if dji:
+                break
+
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        # X-axis formatting for winter
+        tick_positions = [1, 32, 63, 91]
+        tick_labels = ['Dec', 'Jan', 'Feb', 'Mar']
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels)
+
+        for day in tick_positions:
+            ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+
+        ax.set_xlim(1, 91)
+        
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        ylim = ax.get_ylim()
+        ax.set_ylim(ylim)
+
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.15), ncol=4, frameon=True, fancybox=True)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diffs_winter{suffix}.png", 
+                   bbox_inches='tight')
+    
+    return fig
+
+def plot_seasonal_summer_all_difference(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_summer_all_difference",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal data for ALL category during summer period (April - E. o. Nov),
+    comparing 2 climate periods: 1959-1990 (dotted lines) vs 1991-2022 (solid lines).
+    """
+    # Filter summer months (April - Nov) and ALL category
+    summer_data = props_as_df.filter(
+        (pl.col("time").dt.month().is_in([4, 5, 6, 7, 8, 9, 10, 11])) &
+        (pl.col("jet") == "ALL")
+    )
+    
+    summer_data = summer_data.with_columns(
+        pl.when(pl.col("time").dt.year() <= 1990)
+          .then(pl.lit("1959-1990"))
+          .when(pl.col("time").dt.year() >= 1991)
+          .then(pl.lit("1991-2022"))
+          .otherwise(pl.lit("other"))
+          .alias("period")
+    )
+    
+    # Filter data not in target periods
+    summer_data = summer_data.filter(pl.col("period").is_in(["1959-1990", "1991-2022"]))
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    # Group by dayofyear, jet, and period
+    gb = summer_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet"), pl.col("period")],
+    )
+    means = gb.agg([pl.col(col).mean() for col in data_vars]).sort(["dayofyear", "jet", "period"])
+    
+    # Rolling average - handle each jet-period combination separately
+    rolled_means = []
+    jets = ["ALL"]
+    periods = ["1959-1990", "1991-2022"]
+    
+    for jet in jets:
+        for period in periods:
+            subset = means.filter((pl.col("jet") == jet) & (pl.col("period") == period))
+            if len(subset) > 0:
+                rolled_subset = periodic_rolling_pl(subset, 15, data_vars)
+                # Ensure jet and period columns are preserved
+                rolled_subset = rolled_subset.with_columns([
+                    pl.lit(jet).alias("jet"),
+                    pl.lit(period).alias("period")
+                ])
+                rolled_means.append(rolled_subset)
+    
+    if rolled_means:
+        means = pl.concat(rolled_means)
+    
+    x = means["dayofyear"].unique().to_numpy()
+    
+    # Line style: 1959-1990 = dotted, 1991-2022 = solid
+    period_styles = {"1959-1990": "dotted", "1991-2022": "solid"}
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+
+        for period in periods:
+            jet_period_data = means.filter(
+                (pl.col("jet") == "ALL") & (pl.col("period") == period)
+            ).sort("dayofyear")
+            
+            if len(jet_period_data) == 0:
+                continue
+
+            full_days = np.arange(1, 367)
+
+            # align all values on same grid (missing -> NaN)
+            ys = np.full_like(full_days, np.nan, dtype=float)
+
+            day_idx = np.clip(jet_period_data["dayofyear"].to_numpy() - 1, 0, 365)
+            ys[day_idx] = jet_period_data[varname].to_numpy()
+
+            # ALL category: dark blue color
+            color = "darkblue"
+            linestyle = period_styles[period]
+            linewidth = 3 if linestyle == "solid" else 2.5
+            alpha = 1.0 if linestyle == "solid" else 0.8
+            
+            label = f"ALL ({period})" if not dji else f"DJI ({period})"
+            ax.plot(
+                full_days, ys, 
+                lw=linewidth, 
+                color=color, 
+                linestyle=linestyle,
+                alpha=alpha,
+                label=label, 
+                zorder=10
+            )
+            
+            if dji:
+                break
+                
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        # Summer markers (Apr, Jun, Sep, Nov)
+        seasonal_days = [91, 152, 244, 305]  # circa
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):  # Only lines within range
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+        ylim = ax.get_ylim()
+        wherex = np.isin(x, JJADOYS)
+        ax.set_ylim(ylim)
+        
+     # Legend
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, frameon=True, fancybox=True)
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png", 
+                   bbox_inches='tight')
+    return fig
+
+
+
+def plot_seasonal_difference(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    period1_years: tuple = (1959, 1990),
+    period2_years: tuple = (1991, 2022),
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal differences between two time periods vs. the overall average.
+    
+    Parameters:
+    -----------
+    props_as_df : pl.DataFrame
+        DataFrame with time column and data variables
+    data_vars : list
+        List of variable names to plot
+    period1_years : tuple
+        Start and end year for first period (default: 1959-1990)
+    period2_years : tuple  
+        Start and end year for second period (default: 1991-2022)
+    """
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    # Filter data periods
+    period1_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period1_years[0]) & 
+        (pl.col("time").dt.year() <= period1_years[1])
+    )
+    period2_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period2_years[0]) & 
+        (pl.col("time").dt.year() <= period2_years[1])
+    )
+    
+    # Group by day of year and jet for each period
+    gb_period1 = period1_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_period2 = period2_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_all = props_as_df.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    
+    # Calc means
+    means_period1 = gb_period1.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_period2 = gb_period2.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_all = gb_all.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    
+    # Rolling average
+    means_period1 = periodic_rolling_pl(means_period1, 15, data_vars)
+    means_period2 = periodic_rolling_pl(means_period2, 15, data_vars)
+    means_all = periodic_rolling_pl(means_all, 15, data_vars)
+    
+    x = means_all["dayofyear"].unique().to_numpy()
+    jets = means_all["jet"].unique().to_numpy().tolist()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+
+        for i, jet in enumerate(jets):
+            # Filter data for current jet
+            jet_means_p1 = means_period1.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_p2 = means_period2.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_all = means_all.filter(pl.col("jet") == jet).sort("dayofyear")
+
+            full_days = np.arange(1, 367)
+
+            # Align all values on same grid (missing -> NaN)
+            values_p1 = np.full_like(full_days, np.nan, dtype=float)
+            values_p2 = np.full_like(full_days, np.nan, dtype=float)
+            values_all = np.full_like(full_days, np.nan, dtype=float)
+
+            # Fill mean values
+            if len(jet_means_p1) > 0:
+                day_idx = np.clip(jet_means_p1["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p1[day_idx] = jet_means_p1[varname].to_numpy()
+            if len(jet_means_p2) > 0:
+                day_idx = np.clip(jet_means_p2["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p2[day_idx] = jet_means_p2[varname].to_numpy()
+            if len(jet_means_all) > 0:
+                day_idx = np.clip(jet_means_all["dayofyear"].to_numpy() - 1, 0, 365)
+                values_all[day_idx] = jet_means_all[varname].to_numpy()
+
+            # Calculate diffs
+            diff_p1 = values_p1 - values_all
+            diff_p2 = values_p2 - values_all
+
+            # Colors and line styles
+            if jet == "ALL":
+                color = "darkblue"
+            elif jet == "EDJ":
+                color = "purple"
+            elif jet == "STJ":
+                color = "hotpink"
+            else:
+                # Fallback
+                fallback_colors = ["orange", "brown", "cyan", "magenta"]
+                color = fallback_colors[i % len(fallback_colors)]
+
+            # Early period dotted, later period solid lines
+            linestyle1, linestyle2 = ":", "-"
+
+            # Plot mean differences
+            if np.any(~np.isnan(diff_p1)):
+                ax.plot(full_days, diff_p1, lw=3, color=color, 
+                       label=f"{jet} ({period1_years[0]}-{period1_years[1]})", 
+                       linestyle=linestyle1, zorder=10)
+            if np.any(~np.isnan(diff_p2)):
+                ax.plot(full_days, diff_p2, lw=3, color=color, 
+                       label=f"{jet} ({period2_years[0]}-{period2_years[1]})", 
+                       linestyle=linestyle2, zorder=10)
+            
+            # Add zero reference line (?)
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, zorder=1)
+
+            if dji:
+                break
+
+        title = f"{letter}) Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        
+        # Add seasonal reference lines
+        seasonal_days = [60, 152, 244, 335]  # March, June, September, December
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        
+        # Handle inverted axis for mean_lev
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+            
+        # JJA shading?
+        ylim = ax.get_ylim()
+        wherex = np.isin(x, JJADOYS)
+        # ax.fill_between(x, *ylim, where=wherex, alpha=0.1, color="black", zorder=-10)
+        ax.set_ylim(ylim)
+
+    axes.ravel()[0].legend().set_zorder(102)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff{suffix}.png", dpi=300, bbox_inches='tight')
+    
+    plt.show()
+    return fig
+
+def plot_seasonal_difference_all_only(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    period1_years: tuple = (1959, 1990),
+    period2_years: tuple = (1991, 2022),
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal differences for ALL category only.
+    """
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    # Filter data for periods
+    period1_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period1_years[0]) & 
+        (pl.col("time").dt.year() <= period1_years[1])
+    )
+    period2_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period2_years[0]) & 
+        (pl.col("time").dt.year() <= period2_years[1])
+    )
+    
+    # Group by day of year and jet for each period
+    gb_period1 = period1_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_period2 = period2_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_all = props_as_df.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    
+    # Calc means
+    means_period1 = gb_period1.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_period2 = gb_period2.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_all = gb_all.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    
+    # Rolling average
+    means_period1 = periodic_rolling_pl(means_period1, 15, data_vars)
+    means_period2 = periodic_rolling_pl(means_period2, 15, data_vars)
+    means_all = periodic_rolling_pl(means_all, 15, data_vars)
+    
+    x = means_all["dayofyear"].unique().to_numpy()
+    jets = ["ALL"]  # OnlyALL category
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        for jet in jets:
+            # Filter data for ALL jet
+            jet_means_p1 = means_period1.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_p2 = means_period2.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_all = means_all.filter(pl.col("jet") == jet).sort("dayofyear")
+
+            full_days = np.arange(1, 367)
+
+            # Align all values on same grid (missing -> NaN)
+            values_p1 = np.full_like(full_days, np.nan, dtype=float)
+            values_p2 = np.full_like(full_days, np.nan, dtype=float)
+            values_all = np.full_like(full_days, np.nan, dtype=float)
+
+            # Fill mean vals
+            if len(jet_means_p1) > 0:
+                day_idx = np.clip(jet_means_p1["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p1[day_idx] = jet_means_p1[varname].to_numpy()
+            if len(jet_means_p2) > 0:
+                day_idx = np.clip(jet_means_p2["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p2[day_idx] = jet_means_p2[varname].to_numpy()
+            if len(jet_means_all) > 0:
+                day_idx = np.clip(jet_means_all["dayofyear"].to_numpy() - 1, 0, 365)
+                values_all[day_idx] = jet_means_all[varname].to_numpy()
+
+            # Calculate diffs (overall mean)
+            diff_p1 = values_p1 - values_all
+            diff_p2 = values_p2 - values_all
+
+            # ALL category:
+            color = "darkblue"
+            linestyle1, linestyle2 = ":", "-"  # Early dotted, later solid
+
+            # Plot mean differences
+            if np.any(~np.isnan(diff_p1)):
+                ax.plot(full_days, diff_p1, lw=3, color=color, 
+                       label=f"{jet} ({period1_years[0]}-{period1_years[1]})", 
+                       linestyle=linestyle1, zorder=10)
+            if np.any(~np.isnan(diff_p2)):
+                ax.plot(full_days, diff_p2, lw=3, color=color, 
+                       label=f"{jet} ({period2_years[0]}-{period2_years[1]})", 
+                       linestyle=linestyle2, zorder=10)
+            
+            # Add zero reference line
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, zorder=1)
+
+        title = f"{letter}) Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        
+        # Seasonal reference lines
+        seasonal_days = [60, 152, 244, 335]  # March, June, Sep, Dec
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(70, 345)
+        
+        # Handle inverted axis for mean_lev
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+            
+        # Add JJA shading if needed
+        ylim = ax.get_ylim()
+        wherex = np.isin(x, JJADOYS)
+        # ax.fill_between(x, *ylim, where=wherex, alpha=0.1, color="black", zorder=-10)
+        ax.set_ylim(ylim)
+
+    # Legend for first subplot
+    axes.ravel()[0].legend().set_zorder(102)
+    
+    fig.suptitle(f"Seasonal Differences (ALL category): {period1_years[0]}-{period1_years[1]} vs {period2_years[0]}-{period2_years[1]}", 
+                fontsize=12, y=0.98)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff_all{suffix}.png", dpi=300, bbox_inches='tight')
+    
+    plt.show()
+    return fig
+
+
+def plot_seasonal_difference_individual_jets(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    period1_years: tuple = (1959, 1990),
+    period2_years: tuple = (1991, 2022),
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    clear: bool = True,
+):
+    """
+    Plot seasonal differences for individual jet categories (EDJ, STJ) only.
+    """
+    
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+    
+    # Filter data periods
+    period1_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period1_years[0]) & 
+        (pl.col("time").dt.year() <= period1_years[1])
+    )
+    period2_data = props_as_df.filter(
+        (pl.col("time").dt.year() >= period2_years[0]) & 
+        (pl.col("time").dt.year() <= period2_years[1])
+    )
+    
+    # Group by day of year and jet for each period
+    gb_period1 = period1_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_period2 = period2_data.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    gb_all = props_as_df.group_by(
+        [pl.col("time").dt.ordinal_day().alias("dayofyear"), pl.col("jet")]
+    )
+    
+    # Calc means for each period
+    means_period1 = gb_period1.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_period2 = gb_period2.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    means_all = gb_all.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
+    
+    # Rolling average
+    means_period1 = periodic_rolling_pl(means_period1, 15, data_vars)
+    means_period2 = periodic_rolling_pl(means_period2, 15, data_vars)
+    means_all = periodic_rolling_pl(means_all, 15, data_vars)
+    
+    x = means_all["dayofyear"].unique().to_numpy()
+    # Filter to only individual jets (exclude "ALL")
+    all_jets = means_all["jet"].unique().to_numpy().tolist()
+    jets = [jet for jet in all_jets if jet != "ALL"]
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        dji = varname == "double_jet_index"
+
+        for i, jet in enumerate(jets):
+            # Filter data for current jet
+            jet_means_p1 = means_period1.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_p2 = means_period2.filter(pl.col("jet") == jet).sort("dayofyear")
+            jet_means_all = means_all.filter(pl.col("jet") == jet).sort("dayofyear")
+
+            full_days = np.arange(1, 367)
+
+            # Align all values on same grid (missing -> NaN)
+            values_p1 = np.full_like(full_days, np.nan, dtype=float)
+            values_p2 = np.full_like(full_days, np.nan, dtype=float)
+            values_all = np.full_like(full_days, np.nan, dtype=float)
+
+            # Fill mean values
+            if len(jet_means_p1) > 0:
+                day_idx = np.clip(jet_means_p1["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p1[day_idx] = jet_means_p1[varname].to_numpy()
+            if len(jet_means_p2) > 0:
+                day_idx = np.clip(jet_means_p2["dayofyear"].to_numpy() - 1, 0, 365)
+                values_p2[day_idx] = jet_means_p2[varname].to_numpy()
+            if len(jet_means_all) > 0:
+                day_idx = np.clip(jet_means_all["dayofyear"].to_numpy() - 1, 0, 365)
+                values_all[day_idx] = jet_means_all[varname].to_numpy()
+
+            # Calculate diffs - overall mean
+            diff_p1 = values_p1 - values_all
+            diff_p2 = values_p2 - values_all
+
+            if jet == "EDJ":
+                color = "purple"
+            elif jet == "STJ":
+                color = "hotpink"
+            else:
+                # Fallback
+                fallback_colors = ["orange", "brown", "cyan", "magenta"]
+                color = fallback_colors[i % len(fallback_colors)]
+
+            # Early period dotted, later period solid lines
+            linestyle1, linestyle2 = ":", "-"
+
+            # Plot mean differences
+            if np.any(~np.isnan(diff_p1)):
+                ax.plot(full_days, diff_p1, lw=3, color=color, 
+                       label=f"{jet} ({period1_years[0]}-{period1_years[1]})", 
+                       linestyle=linestyle1, zorder=10)
+            if np.any(~np.isnan(diff_p2)):
+                ax.plot(full_days, diff_p2, lw=3, color=color, 
+                       label=f"{jet} ({period2_years[0]}-{period2_years[1]})", 
+                       linestyle=linestyle2, zorder=10)
+            
+            # Add zero reference line
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, zorder=1)
+
+            if dji:
+                break
+
+        title = f"{letter}) Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"Δ{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+
+        ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
+        ax.xaxis.set_major_formatter(DateFormatter("%b"))
+        
+        # Add seasonal reference lines
+        seasonal_days = [60, 152, 244, 335]  # March, June, Sep, Dec
+        for day in seasonal_days:
+            if min(x) <= day <= max(x):
+                ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
+        
+        ax.set_xlim(min(x), max(x))
+        
+        # Handle inverted axis for mean_lev
+        if varname == "mean_lev":
+            ax.invert_yaxis()
+            
+        ylim = ax.get_ylim()
+        wherex = np.isin(x, JJADOYS)
+        ax.set_ylim(ylim)
+
+    axes.ravel()[0].legend().set_zorder(102)
+    
+    fig.suptitle(f"Seasonal Differences (Individual Jets): {period1_years[0]}-{period1_years[1]} vs {period2_years[0]}-{period2_years[1]}", 
+                fontsize=12, y=0.98)
+    
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff_individual{suffix}.png", dpi=300, bbox_inches='tight')
+    
+    plt.show()
+    return fig
 
 @clear
 def props_histogram(

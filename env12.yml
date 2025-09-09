@@ -30,4 +30,4 @@ dependencies:
   - xrft
   - zarr
   - sphinx-rtd-theme 
-prefix: /storage/homefs/hb22g102/miniforge3/envs/env12
+prefix: /home/mabeling/miniforge3/envs/env12
