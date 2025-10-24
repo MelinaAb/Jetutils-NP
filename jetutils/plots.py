@@ -1088,6 +1088,7 @@ def plot_seasonal(
     )
     means = gb.agg([pl.col(col).mean() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
     means = periodic_rolling_pl(means, 15, data_vars)
+    means = means.with_columns(((pl.col("dayofyear") - 1) % 366 + 1).alias("dayofyear"))
     x = means["dayofyear"].unique().to_numpy()
     medians = gb.agg([pl.col(col).median() for col in data_vars]).sort("dayofyear", "jet", descending=[False, True])
     medians = periodic_rolling_pl(medians, 15, data_vars)
@@ -1148,7 +1149,7 @@ def plot_seasonal(
         #for tick_loc in tick_locs:
         #    if min(x) <= tick_loc <= max(x):  # Only draw lines within data range
         #        ax.axvline(x=tick_loc, color='lightgray', linestyle=':', alpha=0.7, zorder=1)   
-        ax.set_xlim(min(x), max(x))
+        ax.set_xlim(min(x), 366) # min(x) = 1
         if varname == "mean_lev":
             ax.invert_yaxis()
         ylim = ax.get_ylim()
@@ -1157,7 +1158,7 @@ def plot_seasonal(
         ax.set_ylim(ylim)
     axes.ravel()[0].legend().set_zorder(102)
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal{suffix}.png")
     return fig
 
 
@@ -1251,13 +1252,13 @@ def plot_case_study(
         pl.col("time").dt.month().is_in(months)
     )
 
-    # Daily median for case-study
-    def daily_median(df):
+    # Daily mean for case-study
+    def daily_mean(df):
         gb = df.group_by([pl.col("time").alias("time"), pl.col("jet")])
-        median = gb.agg([pl.col(col).median() for col in data_vars])
-        return median
+        mean = gb.agg([pl.col(col).mean() for col in data_vars])
+        return mean
 
-    cs_median = daily_median(case_df)
+    cs_mean = daily_mean(case_df)
 
     # Median by day-of-year for seasonal mean/climatology
     def median_by_doy(df):
@@ -1265,24 +1266,32 @@ def plot_case_study(
         gb = df.group_by(["doy", "jet"])
         median = gb.agg([pl.col(col).median() for col in data_vars])
         return median
-
-    sy_median_doy = median_by_doy(seasonal_year_df)
     sc_median_doy = median_by_doy(seasonal_clim_df)
 
-    jets = cs_median["jet"].unique().to_numpy().tolist()
+    jets = cs_mean["jet"].unique().to_numpy().tolist()
 
     for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+         # Compute daily median for current variable
+        cs_median = (
+            case_df
+            .with_columns(pl.col("time").dt.date().alias("date"))  # extract date (drops hours)
+            .group_by(["date", "jet"])
+            .agg([pl.col(varname).median()])
+            .rename({"date": "time"}))
+
         for i, jet in enumerate(jets):
             # Case study
-            cs_pd = cs_median.filter(pl.col("jet")==jet).sort("time").to_pandas()
+            cs_pd = cs_mean.filter(pl.col("jet")==jet).sort("time").to_pandas()
             cs_pd['time'] = pd.to_datetime(cs_pd['time'])
             cs_pd.set_index('time', inplace=True)
             cs_vals = cs_pd[varname].reindex(case_days).to_numpy()
 
-            # Seasonal mean for year
-            sy_pd = sy_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
-            sy_pd.set_index('doy', inplace=True)
-            sy_interp = np.interp(case_doys, sy_pd.index, sy_pd[varname])
+            # Median
+            cs_median_pd = cs_median.filter(pl.col("jet")==jet).sort("time").to_pandas()
+            cs_median_pd['time'] = pd.to_datetime(cs_median_pd['time'])
+            cs_median_pd.set_index('time', inplace=True)
+            cs_median_vals = cs_median_pd[varname].reindex(case_days).to_numpy()
+            #sy_interp = np.interp(case_doys, sy_pd.index, sy_pd[varname])
 
             # Climatology
             sc_pd = sc_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
@@ -1302,16 +1311,53 @@ def plot_case_study(
             # Interpolate to case_days
             q025_interp = np.interp(case_doys, q025_pd.index, q025_pd[varname])
             q075_interp = np.interp(case_doys, q075_pd.index, q075_pd[varname])
+           
+            is_longitude = 'lon' in varname.lower()
+            if is_longitude: #and (np.max(cs_vals) - np.min(cs_vals) > 180):
+                # new version
+                cs_vals     = np.unwrap(np.radians(cs_vals))
+                cs_median_vals = np.unwrap(np.radians(cs_median_vals))
+                sc_interp   = np.unwrap(np.radians(sc_interp))
+                q025_interp = np.unwrap(np.radians(q025_interp))
+                q075_interp = np.unwrap(np.radians(q075_interp))
 
-            # Shaded area
+                def unwrap_and_wrap(arr, wrap_center=180):
+                    """
+                    Unwrap circular data to remove jumps, then wrap back into [-180, 180] or [0, 360].
+                    wrap_center = 180  → wrap to [-180, 180]
+                    wrap_center = 360  → wrap to [0, 360]
+                    """
+                    arr = np.unwrap(np.radians(arr))         # unwrap in radians
+                    arr = np.degrees(arr)                    # back to degrees
+                    arr = (arr + wrap_center) % 360 - wrap_center
+                    return arr
+                
+                cs_vals        = unwrap_and_wrap(cs_vals, wrap_center=180)   # stays in [-180, 180]
+                cs_median_vals = unwrap_and_wrap(cs_median_vals, wrap_center=180)
+                sc_interp      = unwrap_and_wrap(sc_interp, wrap_center=180)
+                q025_interp    = unwrap_and_wrap(q025_interp, wrap_center=180)
+                q075_interp    = unwrap_and_wrap(q075_interp, wrap_center=180)
+
+                                
+                """
+                # old version
+                # Adjust negative values to 0-360 range for plotting
+                cs_vals = np.where(cs_vals < 0, cs_vals + 360, cs_vals)
+                sy_interp = np.where(sy_interp < 0, sy_interp + 360, sy_interp)
+                sc_interp = np.where(sc_interp < 0, sc_interp + 360, sc_interp)
+                q025_interp = np.where(q025_interp < 0, q025_interp + 360, q025_interp)
+                q075_interp = np.where(q075_interp < 0, q075_interp + 360, q075_interp)
+                """
+            
+
+            label_str = f"(Daily mean {start_EE_dt.strftime('%d.%b %Y')} - {end_EE_dt.strftime('%d.%b %Y')})"#{case_name} ({case_days[0].strftime('%d.%b %Y')} - {case_days[-1].strftime('%d.%b %Y')})"
+            ax.plot(case_days, cs_vals, lw=3, color="red", label=label_str, zorder=10)
+            ax.plot(case_days, cs_median_vals, lw=2, color="blue", ls="--", label=f"{season} daily median", zorder=5)
+            ax.plot(case_days, sc_interp, lw=2, color="black", ls=":", label=f"{season} 10 years daily mean", zorder=0)
+            # Your existing plotting code stays exactly the same:
             ax.fill_between(case_days, q025_interp, q075_interp,
                             color="lightgrey", alpha=0.44, label="10y quantiles", zorder=1)
-
-            label_str = f"{case_name} {case_days[0].strftime('%d.%b %Y')} to {case_days[-1].strftime('%d.%b %Y')})"
-            ax.plot(case_days, cs_vals, lw=3, color="red", label=label_str, zorder=10)
-            ax.plot(case_days, sy_interp, lw=2, color="blue", ls="--", label=f"{season} mean {year}", zorder=5)
-            ax.plot(case_days, sc_interp, lw=2, color="black", ls=":", label=f"{season} 10 Yrs seasonal mean", zorder=0)
-            
+                        
             # Shaded area or vertical line for EE period
             if start_date_EE is not None and end_date_EE is not None:
                 if start_EE_dt == end_EE_dt:
@@ -1320,8 +1366,8 @@ def plot_case_study(
                     ax.axvspan(start_EE_dt, end_EE_dt, color='lightcoral', alpha=0.25, zorder=-5)
 
 
-        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)}" if numbering \
-                else f"{PRETTIER_VARNAME.get(varname, varname)}"
+        title =f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
         ax.set_title(title)
         ax.set_xlim(case_days[0], case_days[-1])
 
@@ -1342,6 +1388,571 @@ def plot_case_study(
 
     if save:
         plt.savefig(f"/home/mabeling/MasterThesis/plots/extremeEvents/casestudy_{suffix}.png")
+    return fig
+
+
+def plot_case_study_6h(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    start_date: str,      # "DDMMYYYY"
+    end_date: str,        # "DDMMYYYY"
+    season: str,          # "DJF", "MAM", "JJA" or "SON"
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    n_xticks: int = 6,  # number of evenly spaced ticks for case-study
+    start_date_EE: str = None,
+    end_date_EE: str = None,
+    case_name: str = None,
+    use_6h_data: bool = True  # New parameter to control 6h vs daily data
+
+):
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    start_dt = pd.to_datetime(start_date, format="%d%m%Y")
+    end_dt   = pd.to_datetime(end_date, format="%d%m%Y")
+    case_days = pd.date_range(start_dt, end_dt, freq="D")
+    case_doys = case_days.dayofyear
+    
+    if start_date_EE is not None and end_date_EE is not None:
+        start_EE_dt = pd.to_datetime(start_date_EE, format="%d%m%Y")
+        end_EE_dt   = pd.to_datetime(end_date_EE, format="%d%m%Y")
+
+    # Case-study period
+    case_df = props_as_df.filter(
+        (pl.col("time") >= start_dt) & (pl.col("time") <= end_dt)
+    )
+
+    # Seasonal months
+    season_months = {"DJF": [12,1,2], "MAM": [3,4,5], "JJA": [6,7,8], "SON": [9,10,11]}
+    months = season_months[season]
+
+    # Seasonal mean for year
+    year = start_dt.year
+    #seasonal_year_df = props_as_df.filter(
+    #    (pl.col("time").dt.year() == year) & (pl.col("time").dt.month().is_in(months))
+    #)
+
+    clim_start_year = max(1959, year - 10)  # Not earlier than dataset start
+    clim_end_year = year - 1
+
+    seasonal_clim_df = props_as_df.filter(
+        (pl.col("time").dt.year().is_in(range(clim_start_year, clim_end_year+1))) &
+        (pl.col("time").dt.month().is_in(months))
+    )
+
+    # x-axis ticks
+    def get_case_study_ticks(dates, n_ticks):
+        if len(dates) <= n_ticks:
+            return dates  # all dates if short
+        indices = np.linspace(0, len(dates)-1, n_ticks, dtype=int)
+        return dates[indices]
+
+    xticks = get_case_study_ticks(case_days, n_xticks)
+    
+    # Daily mean for case-study
+    def daily_mean(df):
+        gb = df.group_by([pl.col("time").alias("time"), pl.col("jet")])
+        mean = gb.agg([pl.col(col).mean() for col in data_vars])
+        return mean
+
+    # 6-hourly mean for case-study
+    def case_study_6h(df):
+        gb = df.group_by([pl.col("time"), pl.col("jet")])
+        result = gb.agg([pl.col(col).mean() for col in data_vars])
+        return result
+
+    # Choose between 6-hourly or daily data for the red line
+    if use_6h_data:
+        cs_data = case_study_6h(case_df)
+    else:
+        cs_data = daily_mean(case_df)
+    
+    # Daily mean seasonal
+    def mean_by_doy(df):
+        df = df.with_columns(pl.col("time").dt.ordinal_day().alias("doy"))
+        gb = df.group_by(["doy", "jet"])
+        mean = gb.agg([pl.col(col).mean() for col in data_vars])
+        return mean
+
+    sc_mean_doy = mean_by_doy(seasonal_clim_df)
+
+    jets = cs_data["jet"].unique().to_numpy().tolist()
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        cs_median = (
+            case_df
+            .with_columns(pl.col("time").dt.date().alias("date"))  # extract day
+            .group_by(["date", "jet"])
+            .agg([pl.col(varname).median().alias(varname)])       # median per var
+            .sort(["date", "jet"])
+            .rename({"date": "time"})                             # rename for plotting
+        )
+        for i, jet in enumerate(jets):
+            # Case study - now with 6-hourly data option
+            cs_pd = cs_data.filter(pl.col("jet")==jet).sort("time").to_pandas()
+            cs_pd['time'] = pd.to_datetime(cs_pd['time'])
+            cs_pd.set_index('time', inplace=True)
+            
+            if use_6h_data:
+                # For 6-hourly data, use all available timestamps
+                cs_times = cs_pd.index
+                cs_vals = cs_pd[varname].to_numpy()
+            else:
+                # For daily data, reindex to case_days as before
+                cs_vals = cs_pd[varname].reindex(case_days).to_numpy()
+                cs_times = case_days
+
+            # Median
+            cs_median_pd = cs_median.filter(pl.col("jet") == jet).sort("time").to_pandas()
+            cs_median_pd['time'] = pd.to_datetime(cs_median_pd['time'])
+            cs_median_pd.set_index('time', inplace=True)
+            cs_median_vals = cs_median_pd[varname].reindex(case_days).to_numpy()
+
+            # Climatology
+            sc_pd = sc_mean_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
+            sc_pd.set_index('doy', inplace=True)
+            sc_interp = np.interp(case_doys, sc_pd.index, sc_pd[varname])
+
+            # 10-year quantiles (25–75%) for shading 
+            gb = seasonal_clim_df.with_columns(pl.col("time").dt.ordinal_day().alias("doy")) \
+                .group_by(["doy", "jet"])
+            q025 = gb.quantile(0.25).sort("doy")
+            q075 = gb.quantile(0.75).sort("doy")
+
+            # Filter current jet
+            q025_pd = q025.filter(pl.col("jet") == jet).sort("doy").to_pandas().set_index("doy")
+            q075_pd = q075.filter(pl.col("jet") == jet).sort("doy").to_pandas().set_index("doy")
+
+            # Interpolate to case_days
+            q025_interp = np.interp(case_doys, q025_pd.index, q025_pd[varname])
+            q075_interp = np.interp(case_doys, q075_pd.index, q075_pd[varname])
+
+            is_longitude = 'lon' in varname.lower()
+            if is_longitude: # and (np.max(cs_vals) - np.min(cs_vals) > 180):
+                # new version
+                cs_vals     = np.unwrap(np.radians(cs_vals))
+                cs_median_vals = np.unwrap(np.radians(cs_median_vals))
+                sc_interp   = np.unwrap(np.radians(sc_interp))
+                q025_interp = np.unwrap(np.radians(q025_interp))
+                q075_interp = np.unwrap(np.radians(q075_interp))
+
+                def unwrap_and_wrap(arr, wrap_center=180):
+                    """
+                    Unwrap circular data to remove jumps, then wrap back into [-180, 180] or [0, 360].
+                    wrap_center = 180  (wrap to [-180, 180])
+                    wrap_center = 360  (wrap to [0, 360])
+                    """
+                    arr = np.unwrap(np.radians(arr))         # unwrap in radians
+                    arr = np.degrees(arr)                    # back to degrees
+                    arr = (arr + wrap_center) % 360 - wrap_center
+                    return arr
+                
+                cs_vals        = unwrap_and_wrap(cs_vals, wrap_center=180)
+                cs_median_vals = unwrap_and_wrap(cs_median_vals, wrap_center=180)
+                sc_interp      = unwrap_and_wrap(sc_interp, wrap_center=180)
+                q025_interp    = unwrap_and_wrap(q025_interp, wrap_center=180)
+                q075_interp    = unwrap_and_wrap(q075_interp, wrap_center=180)
+
+                
+            # Plot 6h data
+            ax.fill_between(case_days, q025_interp, q075_interp,
+                            color="lightgrey", alpha=0.44, label="10y quantiles", zorder=1)
+            
+            if use_6h_data:
+                label_leg = "6h mean"
+            else: 
+                label_leg = "Daily mean"
+                
+            # Lines
+            ax.plot(cs_times, cs_vals, lw=3, color="red", label=label_leg, zorder=10)
+            ax.plot(case_days, cs_median_vals, lw=2, color="blue", ls="--", label=f"Daily median", zorder=5)
+            ax.plot(case_days, sc_interp, lw=2, color="black", ls=":", label=f"{season} 10 year seasonal mean", zorder=0)
+                        
+            # Shaded area or vertical line for EE period
+            if start_date_EE is not None and end_date_EE is not None:
+                if start_EE_dt == end_EE_dt:
+                    ax.axvline(x=start_EE_dt, color='lightgrey', linestyle='-', lw=2, zorder=-5, label='Extreme Event')
+                else:
+                    ax.axvspan(start_EE_dt, end_EE_dt, color='lightcoral', alpha=0.25, zorder=-5, label='Extreme Event')
+
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+        ax.set_xlim(case_days[0], case_days[-1])
+
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([d.strftime("%d. %b") for d in xticks], rotation=45)
+
+        label_title = f"Jet Properties {case_name} - {case_days[0].strftime('%d. %b %Y')} to {case_days[-1].strftime('%d. %b %Y')}"
+        if use_6h_data:
+            label_title += " (6h)"
+                
+        fig.suptitle(label_title, fontsize=16, fontweight="bold", y=1.02)
+
+        # Legend
+        handles, labels = axes.ravel()[0].get_legend_handles_labels()
+        fig.legend(
+            handles, 
+            labels, 
+            loc='lower center', 
+            bbox_to_anchor=(0.5, -0.1), 
+            ncol=4, 
+            frameon=True, 
+            fancybox=True
+        )
+
+    if save:
+        suffix_6h = f"{suffix}_6h" if use_6h_data else suffix
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/extremeEvents/casestudy_{suffix_6h}.png")
+    return fig
+
+
+          
+
+
+
+
+def plot_case_study_winter_jets(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    start_date: str,      # "DDMMYYYY"
+    end_date: str,        # "DDMMYYYY"
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "_case_winter_jets",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    n_xticks: int = 6,    # number of evenly spaced ticks for case-study
+    start_date_EE: str = None,
+    end_date_EE: str = None,
+    case_name: str = None
+):
+    """
+    Case study plot for DJF+March focusing on STJ and EDJ jets.
+    Compares case period vs same-season mean for that year vs climatology.
+    """
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    # Parse case-study dates
+    start_dt = pd.to_datetime(start_date, format="%d%m%Y")
+    end_dt   = pd.to_datetime(end_date, format="%d%m%Y")
+    case_days = pd.date_range(start_dt, end_dt, freq="D")
+    case_doys = case_days.dayofyear
+    
+    if start_date_EE and end_date_EE:
+        start_EE_dt = pd.to_datetime(start_date_EE, format="%d%m%Y")
+        end_EE_dt   = pd.to_datetime(end_date_EE, format="%d%m%Y")
+
+    # Case study: restrict to period & STJ+EDJ
+    case_df = props_as_df.filter(
+        (pl.col("time") >= start_dt) & (pl.col("time") <= end_dt) &
+        (pl.col("jet").is_in(["STJ", "EDJ"]))
+    )
+
+    # Winter months (DJF+March)
+    winter_months = [12, 1, 2, 3]
+    year = start_dt.year
+    seasonal_year_df = props_as_df.filter(
+        (pl.col("time").dt.year() == year) &
+        (pl.col("time").dt.month().is_in(winter_months)) &
+        (pl.col("jet").is_in(["STJ", "EDJ"]))
+    )
+
+    # Climatology: 10y window
+    clim_start_year = max(1959, year - 10)
+    clim_end_year   = year - 1
+    seasonal_clim_df = props_as_df.filter(
+        (pl.col("time").dt.year().is_in(range(clim_start_year, clim_end_year+1))) &
+        (pl.col("time").dt.month().is_in(winter_months)) &
+        (pl.col("jet").is_in(["STJ", "EDJ"]))
+    )
+
+    # Helper: daily median
+    def daily_median(df):
+        gb = df.group_by([pl.col("time"), pl.col("jet")])
+        return gb.agg([pl.col(col).median() for col in data_vars])
+
+    # Helper: median by day-of-year
+    def median_by_doy(df):
+        df = df.with_columns(pl.col("time").dt.ordinal_day().alias("doy"))
+        gb = df.group_by(["doy", "jet"])
+        return gb.agg([pl.col(col).median() for col in data_vars])
+
+    cs_median   = daily_median(case_df)
+    sy_median_doy = median_by_doy(seasonal_year_df)
+    sc_median_doy = median_by_doy(seasonal_clim_df)
+
+    jets = ["STJ", "EDJ"]
+
+    # Define evenly spaced x-ticks
+    def get_case_study_ticks(dates, n_ticks):
+        if len(dates) <= n_ticks:
+            return dates
+        indices = np.linspace(0, len(dates)-1, n_ticks, dtype=int)
+        return dates[indices]
+
+    xticks = get_case_study_ticks(case_days, n_xticks)
+
+    # Plot loop
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        for jet in jets:
+            # Case-study
+            cs_pd = cs_median.filter(pl.col("jet")==jet).sort("time").to_pandas()
+            cs_pd['time'] = pd.to_datetime(cs_pd['time'])
+            cs_pd.set_index('time', inplace=True)
+            cs_vals = cs_pd[varname].reindex(case_days).to_numpy()
+
+            # Seasonal mean for year
+            sy_pd = sy_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
+            sy_pd.set_index('doy', inplace=True)
+            sy_interp = np.interp(case_doys, sy_pd.index, sy_pd[varname])
+
+            # Climatology
+            sc_pd = sc_median_doy.filter(pl.col("jet")==jet).sort("doy").to_pandas()
+            sc_pd.set_index('doy', inplace=True)
+            sc_interp = np.interp(case_doys, sc_pd.index, sc_pd[varname])
+
+            # Quantiles from climatology
+            gb = seasonal_clim_df.with_columns(pl.col("time").dt.ordinal_day().alias("doy")) \
+                                 .group_by(["doy", "jet"])
+            q025 = gb.quantile(0.25)
+            q075 = gb.quantile(0.75)
+
+            q025_pd = q025.filter(pl.col("jet")==jet).sort("doy").to_pandas().set_index("doy")
+            q075_pd = q075.filter(pl.col("jet")==jet).sort("doy").to_pandas().set_index("doy")
+
+            q025_interp = np.interp(case_doys, q025_pd.index, q025_pd[varname])
+            q075_interp = np.interp(case_doys, q075_pd.index, q075_pd[varname])
+
+            # Longitude fix (wraparound)
+            is_longitude = 'lon' in varname.lower()
+            if is_longitude and (np.max(cs_vals) - np.min(cs_vals) > 180):
+                cs_vals = np.where(cs_vals < 0, cs_vals + 360, cs_vals)
+                sy_interp = np.where(sy_interp < 0, sy_interp + 360, sy_interp)
+                sc_interp = np.where(sc_interp < 0, sc_interp + 360, sc_interp)
+                q025_interp = np.where(q025_interp < 0, q025_interp + 360, q025_interp)
+                q075_interp = np.where(q075_interp < 0, q075_interp + 360, q075_interp)
+
+            # Plot
+            ax.fill_between(case_days, q025_interp, q075_interp, alpha=0.25, label=f"{jet} 10y IQR")
+            ax.plot(case_days, cs_vals, lw=3, label=f"{jet} {case_name or 'Case'}", zorder=10)
+            ax.plot(case_days, sy_interp, lw=2, ls="--", label=f"{jet} {year} mean", zorder=5)
+            ax.plot(case_days, sc_interp, lw=2, ls=":", label=f"{jet} 10y clim", zorder=0)
+
+            # Highlight EE period
+            if start_date_EE and end_date_EE:
+                if start_EE_dt == end_EE_dt:
+                    ax.axvline(x=start_EE_dt, color='lightgrey', lw=2)
+                else:
+                    ax.axvspan(start_EE_dt, end_EE_dt, color='lightcoral', alpha=0.25)
+
+        title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+        ax.set_xlim(case_days[0], case_days[-1])
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([d.strftime("%d. %b") for d in xticks], rotation=45)
+
+    # Legend once (bottom)
+    handles, labels = axes.ravel()[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='lower center',
+               bbox_to_anchor=(0.5, -0.1), ncol=4, frameon=True, fancybox=True)
+
+    if save:
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/extremeEvents/casestudy_winter{suffix}.png")
+    return fig
+
+def plot_case_study_EDJ_DJF(
+    props_as_df: pl.DataFrame,
+    data_vars: list,
+    start_date: str,      # "DDMMYYYY"
+    end_date: str,        # "DDMMYYYY"
+    nrows: int = 3,
+    ncols: int = 4,
+    suffix: str = "",
+    numbering: bool = False,
+    *,
+    save: bool = False,
+    n_xticks: int = 6,
+    start_date_EE: str = None,
+    end_date_EE: str = None,
+    case_name: str = None,
+    use_6h_data: bool = True
+):
+
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(ncols * 3.5, nrows * 2.4),
+        tight_layout=True,
+        sharex="all",
+    )
+    axes = axes.flatten()
+
+    start_dt = pd.to_datetime(start_date, format="%d%m%Y")
+    end_dt   = pd.to_datetime(end_date, format="%d%m%Y")
+    case_days = pd.date_range(start_dt, end_dt, freq="D")
+    case_doys = case_days.dayofyear
+    
+    if start_date_EE is not None and end_date_EE is not None:
+        start_EE_dt = pd.to_datetime(start_date_EE, format="%d%m%Y")
+        end_EE_dt   = pd.to_datetime(end_date_EE, format="%d%m%Y")
+
+    # Restrict to EDJ jet only
+    props_as_df = props_as_df.filter(pl.col("jet") == "EDJ")
+
+    # Case-study period
+    case_df = props_as_df.filter(
+        (pl.col("time") >= start_dt) & (pl.col("time") <= end_dt)
+    )
+
+    # DJF months
+    months = [12, 1, 2]
+
+    # Seasonal mean for year
+    year = start_dt.year
+    seasonal_year_df = props_as_df.filter(
+        (pl.col("time").dt.year() == year) & (pl.col("time").dt.month().is_in(months))
+    )
+
+    # 10-year climatology
+    clim_start_year = max(1959, year - 10)
+    clim_end_year = year - 1
+    seasonal_clim_df = props_as_df.filter(
+        (pl.col("time").dt.year().is_in(range(clim_start_year, clim_end_year+1))) &
+        (pl.col("time").dt.month().is_in(months))
+    )
+
+    # Tick helper
+    def get_case_study_ticks(dates, n_ticks):
+        if len(dates) <= n_ticks:
+            return dates
+        indices = np.linspace(0, len(dates)-1, n_ticks, dtype=int)
+        return dates[indices]
+
+    xticks = get_case_study_ticks(case_days, n_xticks)
+
+    # Aggregators
+    def daily_mean(df):
+        gb = df.group_by("time")
+        return gb.agg([pl.col(col).mean() for col in data_vars])
+
+    def case_study_6h(df):
+        gb = df.group_by("time")
+        return gb.agg([pl.col(col).mean() for col in data_vars])
+
+    if use_6h_data:
+        cs_data = case_study_6h(case_df)
+    else:
+        cs_data = daily_mean(case_df)
+
+    def mean_by_doy(df):
+        df = df.with_columns(pl.col("time").dt.ordinal_day().alias("doy"))
+        gb = df.group_by("doy")
+        return gb.agg([pl.col(col).mean() for col in data_vars])
+
+    sy_mean_doy = mean_by_doy(seasonal_year_df)
+    sc_mean_doy = mean_by_doy(seasonal_clim_df)
+
+    for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
+        # Case study series
+        cs_pd = cs_data.sort("time").to_pandas()
+        cs_pd["time"] = pd.to_datetime(cs_pd["time"])
+        cs_pd.set_index("time", inplace=True)
+
+        if use_6h_data:
+            cs_times = cs_pd.index
+            cs_vals = cs_pd[varname].to_numpy()
+        else:
+            cs_vals = cs_pd[varname].reindex(case_days).to_numpy()
+            cs_times = case_days
+
+        # Seasonal mean (DJF of that year)
+        sy_pd = sy_mean_doy.sort("doy").to_pandas()
+        sy_pd.set_index("doy", inplace=True)
+        sy_interp = np.interp(case_doys, sy_pd.index, sy_pd[varname])
+
+        # Climatology mean
+        sc_pd = sc_mean_doy.sort("doy").to_pandas()
+        sc_pd.set_index("doy", inplace=True)
+        sc_interp = np.interp(case_doys, sc_pd.index, sc_pd[varname])
+
+        # 10-year quantiles
+        gb = seasonal_clim_df.with_columns(pl.col("time").dt.ordinal_day().alias("doy")) \
+            .group_by("doy")
+        q025 = gb.quantile(0.25).sort("doy")
+        q075 = gb.quantile(0.75).sort("doy")
+        q025_pd = q025.to_pandas().set_index("doy")
+        q075_pd = q075.to_pandas().set_index("doy")
+
+        q025_interp = np.interp(case_doys, q025_pd.index, q025_pd[varname])
+        q075_interp = np.interp(case_doys, q075_pd.index, q075_pd[varname])
+
+        # Longitude wrap
+        is_longitude = "lon" in varname.lower()
+        if is_longitude and (np.max(cs_vals) - np.min(cs_vals) > 180):
+            cs_vals = np.where(cs_vals < 0, cs_vals + 360, cs_vals)
+            sy_interp = np.where(sy_interp < 0, sy_interp + 360, sy_interp)
+            sc_interp = np.where(sc_interp < 0, sc_interp + 360, sc_interp)
+            q025_interp = np.where(q025_interp < 0, q025_interp + 360, q025_interp)
+            q075_interp = np.where(q075_interp < 0, q075_interp + 360, q075_interp)
+
+        # Plotting
+        ax.fill_between(case_days, q025_interp, q075_interp,
+                        color="lightgrey", alpha=0.44, label="10y quantiles", zorder=1)
+
+        label_str = f"{case_name} ({case_days[0].strftime('%d.%b %Y')} to {case_days[-1].strftime('%d.%b %Y')})"
+        if use_6h_data:
+            label_str += " (6h)"
+
+        ax.plot(cs_times, cs_vals, lw=3, color="red", label=label_str, zorder=10)
+        ax.plot(case_days, sy_interp, lw=2, color="blue", ls="--", label=f"DJF mean {year}", zorder=5)
+        ax.plot(case_days, sc_interp, lw=2, color="black", ls=":", label="DJF 10 Yrs seasonal mean", zorder=0)
+
+        # EE highlight
+        if start_date_EE is not None and end_date_EE is not None:
+            if start_EE_dt == end_EE_dt:
+                ax.axvline(x=start_EE_dt, color="lightgrey", linestyle="-", lw=2, zorder=-5)
+            else:
+                ax.axvspan(start_EE_dt, end_EE_dt, color="lightcoral", alpha=0.25, zorder=-5)
+
+        title =f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
+                else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        ax.set_title(title)
+        ax.set_xlim(case_days[0], case_days[-1])
+
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([d.strftime("%d. %b") for d in xticks], rotation=45)
+
+        # Legend
+        handles, labels = axes.ravel()[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="lower center", bbox_to_anchor=(0.5, -0.1),
+                   ncol=4, frameon=True, fancybox=True)
+
+    if save:
+        suffix_6h = f"{suffix}_6h" if use_6h_data else suffix
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/extremeEvents/casestudy_EDJ_DJF{suffix_6h}.png")
     return fig
 
 
@@ -1456,7 +2067,7 @@ def plot_seasonal_winter_jets(
 
     axes.ravel()[0].legend().set_zorder(102)
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal{suffix}.png")
     return fig
 
 
@@ -1563,7 +2174,7 @@ def plot_seasonal_summer_all(
         
     axes.ravel()[0].legend().set_zorder(102)
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summerdif_{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_summerdif_{suffix}.png")
     return fig
 
 
@@ -1708,12 +2319,14 @@ def plot_seasonal_summer_periods(
                ncol=3, frameon=True, fancybox=True)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summer_periods_{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_summer_periods_{suffix}.png")
     return fig
 
 def plot_seasonal_summer_periods(
     props_as_df: pl.DataFrame,
     data_vars: list,
+    period1: tuple[int, int] = (1959, 1990),
+    period2: tuple[int, int] = (1991, 2022),
     nrows: int = 3,
     ncols: int = 4,
     suffix: str = "_summer_periods",
@@ -1723,7 +2336,19 @@ def plot_seasonal_summer_periods(
     clear: bool = True,
 ):
     """
-    Plot seasonal data for ALL category during summer period (April - E. o November)+ full period average + split in two time periods (1959-1990 and 1991-2022).
+    Plot seasonal data for ALL category during summer period (April - November).
+    Shows the full-period average plus two user-defined time periods.
+
+    Parameters
+    ----------
+    props_as_df : pl.DataFrame
+        Input dataframe with 'time' and 'jet' columns.
+    data_vars : list
+        Variables to plot.
+    period1 : tuple[int, int]
+        First period (start_year, end_year).
+    period2 : tuple[int, int]
+        Second period (start_year, end_year).
     """
     # Filter for summer months (April - Nov) and ALL category
     summer_data = props_as_df.filter(
@@ -1732,12 +2357,12 @@ def plot_seasonal_summer_periods(
     )
     
     # Full period, period1, period2
-    full_data = summer_data 
+    full_data = summer_data
     period1_data = summer_data.filter(
-        (pl.col("time").dt.year() >= 1959) & (pl.col("time").dt.year() <= 1990)
+        (pl.col("time").dt.year() >= period1[0]) & (pl.col("time").dt.year() <= period1[1])
     )
     period2_data = summer_data.filter(
-        (pl.col("time").dt.year() >= 1991) & (pl.col("time").dt.year() <= 2022)
+        (pl.col("time").dt.year() >= period2[0]) & (pl.col("time").dt.year() <= period2[1])
     )
     
     fig, axes = plt.subplots(
@@ -1750,21 +2375,27 @@ def plot_seasonal_summer_periods(
     axes = axes.flatten()
     
     periods_data = {
-        "All years": full_data,
-        "Period 1 (1959-1990)": period1_data,
-        "Period 2 (1991-2022)": period2_data
+        "1959-2022": full_data,
+        f"{period1[0]}-{period1[1]}": period1_data,
+        f"{period2[0]}-{period2[1]}": period2_data
     }
     
     colors = {
-        "All years": "darkblue",
-        "Period 1 (1959-1990)": "orange", 
-        "Period 2 (1991-2022)": "darkred"
+        "1959-2022": "darkblue",
+        f"{period1[0]}-{period1[1]}": "orange", 
+        f"{period2[0]}-{period2[1]}": "darkred"
     }
     
     linestyles = {
-        "All years": "-",
-        "Period 1 (1959-1990)": ":",
-        "Period 2 (1991-2022)": "-"
+        "1959-2022": "-",
+        f"{period1[0]}-{period1[1]}": ":",
+        f"{period2[0]}-{period2[1]}": "--"
+    }
+    
+    alphas = {
+        "1959-2022": 0.6,
+        f"{period1[0]}-{period1[1]}": 1,
+        f"{period2[0]}-{period2[1]}": 1
     }
     
     # Stats
@@ -1786,7 +2417,7 @@ def plot_seasonal_summer_periods(
         }
     
     # X-axis range
-    x = period_stats["All years"]['means']["dayofyear"].unique().to_numpy()
+    x = period_stats["1959-2022"]['means']["dayofyear"].unique().to_numpy()
 
     for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
         dji = varname == "double_jet_index"
@@ -1795,11 +2426,12 @@ def plot_seasonal_summer_periods(
             means = stats['means']
             medians = stats['medians']
             
-            if len(means) == 0:  # Skip if no data for this period
+            if len(means) == 0:
                 continue
                 
             jets = means["jet"].unique().to_numpy().tolist()
             color = colors[period_name]
+            alpha = alphas[period_name]
             linestyle = linestyles[period_name]
             
             for i, jet in enumerate(jets):
@@ -1811,7 +2443,6 @@ def plot_seasonal_summer_periods(
 
                 full_days = np.arange(1, 367)
 
-                # align all values on same grid (missing -> NaN)
                 ys      = np.full_like(full_days, np.nan, dtype=float)
                 median  = np.full_like(full_days, np.nan, dtype=float)
 
@@ -1821,7 +2452,7 @@ def plot_seasonal_summer_periods(
                 day_idx = np.clip(jet_medians["dayofyear"].to_numpy() - 1, 0, 365)
                 median[day_idx] = jet_medians[varname].to_numpy()
 
-                ax.plot(full_days, ys, lw=3, color=color, label=period_name, 
+                ax.plot(full_days, ys, lw=3, color=color, label=period_name, alpha=alpha,
                        linestyle=linestyle, zorder=10)
                 
                 if dji:
@@ -1829,28 +2460,36 @@ def plot_seasonal_summer_periods(
                 
         title = f"{letter}) {PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]" if numbering \
                 else f"{PRETTIER_VARNAME.get(varname, varname)} [{UNITS.get(varname, '')}]"
+        
+        #title = (f"{letter}) {PRETTIER_VARNAME.get(varname, varname)}"
+        #    if numbering else f"{PRETTIER_VARNAME.get(varname, varname)}"
+        #)
+        #if varname not in ["wavinessDC16", "wavinessFV15"]:
+        #    unit = UNITS.get(varname, "")
+        #    title += f" [{unit}]" if unit else ""
         ax.set_title(title)
 
         ax.xaxis.set_major_locator(MonthLocator(range(0, 13, 3)))
         ax.xaxis.set_major_formatter(DateFormatter("%b"))
         
-        # Summer markers (Apr, Jun, Sep, Nov)
-        seasonal_days = [91, 152, 244, 305] #ca.
+        seasonal_days = [91, 152, 244, 305]  # approx
         for day in seasonal_days:
-            if min(x) <= day <= max(x):  # Only draw lines within data range
+            if min(x) <= day <= max(x): 
                 ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
         
         ax.set_xlim(min(x), max(x))
         if varname == "mean_lev":
             ax.invert_yaxis()
         
-    # Legend below plots
+    # Legend
     handles, labels = axes.ravel()[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, frameon=True, fancybox=True)
+    fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.06), 
+               ncol=3, frameon=True, fancybox=True)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_summer_periods_{suffix}.png")
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_summer_periods_{suffix}.png")
     return fig
+
 
 def plot_seasonal_winter_jets_difference(
     props_as_df: pl.DataFrame,
@@ -1862,10 +2501,12 @@ def plot_seasonal_winter_jets_difference(
     *,
     save: bool = False,
     clear: bool = True,
+    period1: tuple[int, int] = (1959, 1990),
+    period2: tuple[int, int] = (1991, 2022),
 ):
     """
     Plot seasonal data for STJ and EDJ categories during winter period (Dec - E. o. March),
-    comparing two climate periods: 1959-1990 (dotted lines) vs 1991-2022 (solid lines).
+    comparing two climate periods: 1960-1980 (dotted lines) vs 2000-2020 (solid lines).
     STJ pink, EDJ green.
     """
     
@@ -1883,18 +2524,22 @@ def plot_seasonal_winter_jets_difference(
           .alias("winter_day")
     )
     
+    period1_label = f"{period1[0]}-{period1[1]}"
+    period2_label = f"{period2[0]}-{period2[1]}"
+    period_labels = [period1_label, period2_label]
+
     # Add period classification
     winter_data = winter_data.with_columns(
-        pl.when(pl.col("time").dt.year() <= 1990)
-          .then(pl.lit("1959-1990"))
-          .when(pl.col("time").dt.year() >= 1991)
-          .then(pl.lit("1991-2022"))
-          .otherwise(pl.lit("other"))
-          .alias("period")
+        pl.when(pl.col("time").dt.year().is_between(period1[0], period1[1]))
+        .then(pl.lit(period1_label))
+        .when(pl.col("time").dt.year().is_between(period2[0], period2[1]))
+        .then(pl.lit(period2_label))
+        .otherwise(pl.lit("other"))
+        .alias("period")
     )
-    
-    # Filter data not in periods
-    winter_data = winter_data.filter(pl.col("period").is_in(["1959-1990", "1991-2022"]))
+
+    # Filter data to only include the defined periods
+    winter_data = winter_data.filter(pl.col("period").is_in([period1_label, period2_label]))
 
     fig, axes = plt.subplots(
         nrows,
@@ -1912,7 +2557,7 @@ def plot_seasonal_winter_jets_difference(
     # Rolling average - handle each jet-period combination separately
     rolled_means = []
     for jet in ["STJ", "EDJ"]:
-        for period in ["1959-1990", "1991-2022"]:
+        for period in period_labels:
             subset = means.filter((pl.col("jet") == jet) & (pl.col("period") == period))
             if len(subset) > 0:
                 rolled_subset = periodic_rolling_pl(subset, 15, data_vars, dim="winter_day")
@@ -1927,18 +2572,16 @@ def plot_seasonal_winter_jets_difference(
         means = pl.concat(rolled_means)
     
     jets = ["STJ", "EDJ"]
-    periods = ["1959-1990", "1991-2022"]
+    jet_colors = {"STJ": "#ff2ec0", "EDJ": "#7a1cfe"}
     
-    # STJ = pink, EDJ = green
-    jet_colors = {"STJ": "hotpink", "EDJ": "green"}
-    # Line style: 1959-1990 = dotted, 1991-2022 = solid
-    period_styles = {"1959-1990": "dotted", "1991-2022": "solid"}
-
+    # Line style: first period = dotted, second period = solid
+    period_styles = {period1_label: "dotted", period2_label: "solid"}
+    
     for letter, varname, ax in zip(ascii_lowercase, data_vars, axes.ravel()):
         dji = varname == "double_jet_index"
         
         for jet in jets:
-            for period in periods:
+            for period in period_labels:
                 jet_period_data = means.filter(
                     (pl.col("jet") == jet) & (pl.col("period") == period)
                 ).sort("winter_day")
@@ -1946,10 +2589,10 @@ def plot_seasonal_winter_jets_difference(
                 if len(jet_period_data) == 0:
                     continue
                 
-                full_days = np.arange(1, 92)  # 1–91
+                full_days = np.arange(1, 122)  # 1–121?
                 ys = np.full_like(full_days, np.nan, dtype=float)
                 
-                day_idx = np.clip(jet_period_data["winter_day"].to_numpy() - 1, 0, 90)
+                day_idx = np.clip(jet_period_data["winter_day"].to_numpy() - 1, 0, 120)
                 ys[day_idx] = jet_period_data[varname].to_numpy()
                 
                 color = "black" if dji else jet_colors[jet]
@@ -1978,26 +2621,28 @@ def plot_seasonal_winter_jets_difference(
         ax.set_title(title)
 
         # X-axis formatting for winter
-        tick_positions = [1, 32, 63, 91]
-        tick_labels = ['Dec', 'Jan', 'Feb', 'Mar']
+        tick_positions = [1, 32, 63, 91, 121]
+        tick_labels = ["Dec", "Jan", "Feb", "Mar", "Apr"]
         ax.set_xticks(tick_positions)
         ax.set_xticklabels(tick_labels)
 
         for day in tick_positions:
             ax.axvline(x=day, color='lightgray', linestyle=':', alpha=0.7, zorder=1)
 
-        ax.set_xlim(1, 91)
+        ax.set_xlim(1, 121)
         
         if varname == "mean_lev":
             ax.invert_yaxis()
         ylim = ax.get_ylim()
         ax.set_ylim(ylim)
+        if varname == "mean_lat":  
+            ax.set_yticks(np.arange(np.floor(ylim[0]), np.ceil(ylim[1]) + 3.5, 3.5))
 
     handles, labels = axes.ravel()[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.15), ncol=4, frameon=True, fancybox=True)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diffs_winter{suffix}.png", 
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/new_jet_props_seasonal_diffs_winter{suffix}.png", 
                    bbox_inches='tight')
     
     return fig
@@ -2137,7 +2782,7 @@ def plot_seasonal_summer_all_difference(
     handles, labels = axes.ravel()[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc='lower center', bbox_to_anchor=(0.5, -0.05), ncol=3, frameon=True, fancybox=True)
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal{suffix}.png", 
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal{suffix}.png", 
                    bbox_inches='tight')
     return fig
 
@@ -2304,7 +2949,7 @@ def plot_seasonal_difference(
     axes.ravel()[0].legend().set_zorder(102)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff{suffix}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_diff{suffix}.png", dpi=300, bbox_inches='tight')
     
     plt.show()
     return fig
@@ -2447,7 +3092,7 @@ def plot_seasonal_difference_all_only(
                 fontsize=12, y=0.98)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff_all{suffix}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_diff_all{suffix}.png", dpi=300, bbox_inches='tight')
     
     plt.show()
     return fig
@@ -2603,7 +3248,7 @@ def plot_seasonal_difference_individual_jets(
                 fontsize=12, y=0.98)
     
     if save:
-        plt.savefig(f"/home/mabeling/MasterThesis/plots/jet_props_seasonal_diff_individual{suffix}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"/home/mabeling/MasterThesis/plots/props/jet_props_seasonal_diff_individual{suffix}.png", dpi=300, bbox_inches='tight')
     
     plt.show()
     return fig
@@ -2675,7 +3320,7 @@ def props_histogram(
             )
             ax.xaxis.set_major_formatter(FormatStrFormatter("%g"))
     if save:
-        fig.savefig(f"{FIGURES}/jet_props_hist/{season}{suffix}.png")
+        fig.savefig(f"{FIGURES}/props/jet_props_hist/{season}{suffix}.png")
     return fig
 
 
