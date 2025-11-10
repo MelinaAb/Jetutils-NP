@@ -9,7 +9,8 @@ Finally, it contains a few functions that are useful all over.
 import os
 import pickle as pkl
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict, Optional, Sequence
+from typing import Any, Callable, ClassVar, Dict, Optional, Sequence, Iterable
+from multiprocessing import Pool
 from itertools import groupby
 from dataclasses import dataclass, field
 import time
@@ -20,7 +21,9 @@ from importlib import resources as impresources
 import numpy as np
 import pandas as pd
 import polars as pl
+from polars import Expr
 import xarray as xr
+from tqdm import tqdm
 from dask.diagnostics import ProgressBar  # to use without a specified dask client
 from dask.distributed import progress  # to use with a specified dask client
 
@@ -123,7 +126,7 @@ if "DATADIR" not in globals():
         "int_over_europe": "Intd. speed over Eur.",
         "int_over_namerica": "Intd. speed over NAm.",
         "persistence": "Lifetime",
-        "njets": r"\# Jets",
+        "njets": "# Jets",
         "int_ratio": "Ratio low / high ints",
         "com_speed": "COM speed",
         "double_jet_index": "Double jet index",
@@ -135,6 +138,7 @@ if "DATADIR" not in globals():
         "mean_lat": r"$^{\circ} \mathrm{N}$",
         "mean_lev": r"$\mathrm{hPa}$",
         "mean_s": r"$\mathrm{m} \cdot \mathrm{s}^{-1}$",
+        "mean_theta":  r"$\mathrm{K}$",
         "lon_star": r"$~^{\circ} \mathrm{E}$",
         "lat_star": r"$~^{\circ} \mathrm{N}$",
         "s_star": r"$\mathrm{m} \cdot \mathrm{s}^{-1}$",
@@ -303,6 +307,24 @@ def maybe_circular_mean(x: float) -> float:
     if np.all(np.diff(x) < 2 * dx):
         return np.mean(x)
     return np.atan2(np.mean(np.sin(x)), np.mean(np.cos(x)))
+
+def to_expr(expr: Expr | str) -> Expr:
+    """
+    Make sure it's an `Expr`.
+
+    Parameters
+    ----------
+    expr : Expr | str
+        Either already an `Expr`, or a `str` to be turned into one.
+
+    Returns
+    -------
+    Expr
+        Same as input or `pl.col(expr)`
+    """
+    if isinstance(expr, str):
+        expr = pl.col(expr)
+    return expr
 
 
 def save_pickle(to_save: Any, filename: str | Path) -> None:
@@ -754,6 +776,25 @@ def last_elements(arr: np.ndarray, n_elements: int, sort: bool = False) -> np.nd
     return idxs
 
 
+def squarify(df: pl.DataFrame, index_columns: Sequence[str | list[str]] | None = None) -> pl.DataFrame:
+    if index_columns is None:
+        index_columns = get_index_columns(df)
+    newcols = []
+    for col in index_columns:
+        if not isinstance(col, list | tuple):
+            newcols.append([col])
+        else:
+            newcols.append(col)
+    index_columns = newcols
+    indexer = df[index_columns[0]].unique(index_columns[0]).sort(index_columns[0])
+    for index_column in index_columns[1:]:
+        indexer = indexer.join(df[index_column].unique(index_column).sort(index_column), how="cross")
+    index_columns_unwrapped = []
+    for col in index_columns:
+        index_columns_unwrapped.extend(col)
+    return indexer.join(df.unique(index_columns_unwrapped), on=index_columns_unwrapped, how="left").sort(index_column)
+
+
 def gb_index(
     df: pl.DataFrame,
     group_by: list | tuple,
@@ -983,6 +1024,65 @@ def compute(obj, progress_flag: bool = False, **kwargs):
             return client.compute(obj)  # type: ignore # noqa: F821
     except AttributeError:
         return obj
+
+
+def map_maybe_parallel(
+    iterator: Iterable,
+    func: Callable,
+    len_: int,
+    processes: int = N_WORKERS,
+    chunksize: int | None = None,
+    progress: bool = True,
+    pool_kwargs: dict | None = None,
+    ctx=None,
+) -> list:
+    """
+    Maps a function on the components of an Iterable. Can be parallel if processes is greater than one. In this case the other arguments are used to create a `multiprocessing.Pool`. In most cases, I recommend using `ctx = get_context("spawn")` instead of the default (on linux) `fork`.
+
+    Parameters
+    ----------
+    iterator : Iterable
+        Data
+    func : Callable
+        Function to apply to each element of `iterator`
+    len_ : int
+        len of the `iterator`, so we can display a progress bar.
+    processes : int, optional
+        Number of parallel processes, will not create a `Pool` if 1, by default N_WORKERS
+    chunksize : int, optional
+        How many elements to send to a worker at once, by default 100
+    progress : bool, optional
+        Show a progress bar using `tqdm`, by default True
+    pool_kwargs : dict | None, optional
+        Keyword arguments passed to `multiprocessing.Pool`, by default None
+    ctx : optional
+        Multiporcessing context, created using `multiprocessing.get_context()`, by default None, will be `spawn` on windowd and mac, and `fork` on linux at time of writing, but it should change in python 3.15.
+
+    Returns
+    -------
+    list
+        result of the map coerced into a list.
+    """
+    processes = min(processes, len_)
+    if processes == 1 and progress:
+        return list(tqdm(map(func, iterator), total=len_))
+    if processes == 1:
+        return list(map(func, iterator))
+    if pool_kwargs is None:
+        pool_kwargs = {}
+    if chunksize is None:
+        chunksize = min(int(len_ // processes), 200)
+    pool_func = Pool if ctx is None else ctx.Pool
+    if not progress:
+        with pool_func(processes=processes, **pool_kwargs) as pool:
+            to_ret = pool.imap(func, iterator, chunksize=chunksize)
+            return list(to_ret)
+    with pool_func(processes=processes, **pool_kwargs) as pool:
+        to_ret = tqdm(
+            pool.imap(func, iterator, chunksize=chunksize),
+            total=len_,
+        )
+        return list(to_ret)
 
 
 class TimerError(Exception): 
